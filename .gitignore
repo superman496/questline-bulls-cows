@@ -220,3 +220,4 @@ __marimo__/
 # QuestLine local cache
 .questline_cache/
 benchmark_full_results.json
+questline_replay_*.json
