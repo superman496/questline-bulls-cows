@@ -147,22 +147,49 @@ Possible output:
 
 ---
 
-## Benchmark snapshot
+## Full benchmark
 
-On two fixed random samples totaling 400 answers:
+QuestLine was evaluated against the full search space of all valid answers.
 
-| Strategy | Average | ≤4 steps | ≤5 steps | ≤6 steps | 7+ steps |
-|---|---:|---:|---:|---:|---:|
-| QuestLine | 5.2275 | 65 | 239 | 394 | 6 |
-| AVG baseline | 5.2350 | 59 | 245 | 396 | 4 |
-| MM baseline | 5.3650 | 52 | 212 | 390 | 10 |
+Rules:
 
-Interpretation:
+- 4 digits
+- no repeated digits
+- leading zero allowed
+- total answer space: `10P4 = 5040`
 
-- QuestLine keeps AVG-level average performance.
-- QuestLine has a higher burst rate than AVG.
-- QuestLine has a shorter tail than MM.
-- QuestLine is designed for explainability, not only raw bucket splitting.
+| Metric | Value |
+|---|---:|
+| Total answers | 5040 |
+| Total steps | 26695 |
+| Average steps | 5.2966 |
+| Min steps | 1 |
+| Max steps | 7 |
+| ≤2 steps | 5 |
+| ≤3 steps | 113 |
+| ≤4 steps | 659 |
+| ≤5 steps | 2908 |
+| ≤6 steps | 4899 |
+| 7+ steps | 141 |
+| 8+ steps | 0 |
+
+Step distribution:
+
+| Steps | Count |
+|---:|---:|
+| 1 | 1 |
+| 2 | 4 |
+| 3 | 108 |
+| 4 | 546 |
+| 5 | 2249 |
+| 6 | 1991 |
+| 7 | 141 |
+
+Summary:
+
+> QuestLine solves every valid answer in at most 7 steps, with an average of 5.2966 steps.  
+> 97.20% of all answers are solved within 6 steps.  
+> No 8+ step cases were found in the full benchmark.
 
 ---
 
