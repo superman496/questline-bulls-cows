@@ -74,6 +74,8 @@ Endgame: compress exactly.
 - World-line analysis in reports: main fixed-digit groups, support rates, and support changes over time.
 - StoryBook chapters that connect state, action, feedback, facts, and world-line changes.
 - Three narrative CLI modes: Assist, Simulation, and Adventure.
+- `GameSession` shared state for all three modes.
+- Structured session snapshots and transition timelines for future WebUI clients.
 - Compatible helper functions:
   - `choose_human_like_guess(history, top_k=15)`
   - `print_report(history)`
@@ -81,6 +83,18 @@ Endgame: compress exactly.
 - Built-in class API:
   - `QuestLineSolver.next_guess(history)`
   - `QuestLineSolver.play_answer(answer)`
+  - `GameSession.current_state()`
+  - `GameSession.timeline()`
+  - `GameSession.save()` / `GameSession.resume()`
+- `GameSession.replay()` / `GameSession.export_markdown()`
+
+CLI case commands:
+
+```text
+save    save the current case JSON
+replay  print structured accepted-transition JSON
+export  write the current case book as Markdown
+```
 
 ---
 
