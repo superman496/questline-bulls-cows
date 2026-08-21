@@ -461,6 +461,22 @@ def print_session_history(history: History, lang: str) -> None:
         print(f"  {index:>2}    {guess}     {bulls}      {cows}")
 
 
+def recommendation_reason(item: Dict[str, Any], lang: str = "zh") -> str:
+    reason = item.get("reason") or item.get("action", {}).get("reason") or "推进当前调查"
+    if lang != "zh":
+        return reason
+    return {
+        "fixed first guess": "建立基础事实",
+        "opening book: stable AVG second move": "引入 45 组，建立共同参照",
+        "introduces untested groups": "引入尚未调查的小组",
+        "reuses tested digits in new positions": "复用已知数字，施加位置压力",
+        "tests a remaining candidate directly": "直接验证残局候选",
+        "tests a remaining candidate": "测试仍在候选空间中的答案",
+        "primarily separates feedback buckets": "拆分当前候选世界",
+        "perfect endgame split": "最大化区分残局候选",
+    }.get(reason, reason)
+
+
 def print_story(history: History, solver: Any, lang: str, audit: bool = False) -> None:
     """Print the readable book, or the complete audit book when requested."""
     book = questline.StoryBook.from_history(history, solver=solver)
@@ -611,7 +627,15 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
             print(session.story.render_audit())
             continue
         if low in {"r", "report"}:
-            print_report(solver, session.history, lang, CliState(), reveal_logic=False, include_candidates=False)
+            remaining = candidate_count(solver, session.history)
+            print_report(
+                solver,
+                session.history,
+                lang,
+                CliState(),
+                reveal_logic=remaining == 1,
+                include_candidates=True,
+            )
             continue
         if low in {"h", "help", "?"}:
             print("输入 4 位不重复数字；r 查看当前调查建议；book 查看案件主线；book full 查看完整审计；q 退出。" if lang == "zh" else "Enter four distinct digits; r shows guidance; book reads the case; book full shows the audit; q quits.")
@@ -664,13 +688,19 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
             considered = "、".join(str(item.get("guess")) for item in options)
             print(f"\n侦探研判：当前考虑 {considered}。")
             for index, item in enumerate(options, 1):
-                reason = item.get("reason") or item.get("action", {}).get("reason") or "推进当前调查"
+                reason = recommendation_reason(item, lang)
                 print(f"  {index}. {item.get('guess')}：{reason}")
-            print("直接回车让侦探随机决定，或输入 1-6 选择方案；也可输入 book 查看累计案情。")
+            if len(options) == 1:
+                print("当前只有一个方案，直接回车继续；也可输入 book 查看累计案情。")
+            else:
+                print(f"直接回车让侦探随机决定，或输入 1-{len(options)} 选择方案；也可输入 book 查看累计案情。")
         else:
             considered = ", ".join(str(item.get("guess")) for item in options)
             print(f"\nDetective reasoning: considering {considered}.")
-            print("Press Enter for a random detective choice, enter 1-6 to choose a plan, or book for the cumulative case.")
+            if len(options) == 1:
+                print("Only one plan is available; press Enter to continue, or use book for the cumulative case.")
+            else:
+                print(f"Press Enter for a random detective choice, enter 1-{len(options)} to choose a plan, or book for the cumulative case.")
         while True:
             try:
                 choice = input("> ").strip().lower()

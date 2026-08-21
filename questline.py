@@ -826,6 +826,16 @@ class _QuestLineReasoningLayer(_QuestLineCore):
             classification = "有效推进，但不是纯数学最优"
         else:
             classification = "信息收益有限，偏向叙事或位置试探"
+        structure_gain = []
+        action = event.get("action", {}).get("classification", {})
+        if action.get("new_groups"):
+            structure_gain.append(f"引入新组 {', '.join(action['new_groups'])}")
+        if action.get("new_positions"):
+            structure_gain.append(f"测试新位置 {', '.join(str(pos + 1) for pos in action['new_positions'])}")
+        if event.get("facts", {}).get("confirmed") or event.get("facts", {}).get("excluded"):
+            structure_gain.append("产生身份状态变化")
+        if event.get("position_facts", {}).get("confirmed") or event.get("position_facts", {}).get("strengthened"):
+            structure_gain.append("产生位置证据")
         return {
             "before_count": len(candidates),
             "after_count": len(after_candidates),
@@ -835,6 +845,7 @@ class _QuestLineReasoningLayer(_QuestLineCore):
             "mm": {"guess": ALL_CODES[mm_index], "expected": mm_exp, "max_bucket": mm_max, "buckets": mm_buckets},
             "relative_to_avg": relative,
             "classification": classification,
+            "structure_gain": structure_gain,
         }
 
     @staticmethod
@@ -844,12 +855,17 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         actual = review["actual"]
         avg = review["avg"]
         mm = review["mm"]
+        cost = actual['expected'] - avg['expected']
+        tradeoff = "本步不高于纯 AVG 基准。" if cost <= 0.0001 else f"本步比纯 AVG 多保留 {cost:.2f} 个期望世界。"
+        structure = "；".join(review.get("structure_gain", [])) or "未记录额外结构收益"
         return "\n".join([
             f"### 第 {round_number} 轮行动复盘：{actual['guess']}",
             f"候选空间：{review['before_count']} → {review['after_count']}（缩减 {review['reduction']:.1%}）。",
             f"本步表现：AVG 期望剩余 {actual['expected']:.2f}，最坏分桶 {actual['max_bucket']}，反馈分桶 {actual['buckets']} 个。",
             f"AVG 基准：{avg['guess']} / 期望 {avg['expected']:.2f} / 最坏 {avg['max_bucket']} / {avg['buckets']} 桶。",
             f"MM 基准：{mm['guess']} / 期望 {mm['expected']:.2f} / 最坏 {mm['max_bucket']} / {mm['buckets']} 桶。",
+            f"数学代价：{tradeoff}",
+            f"结构收益：{structure}。",
             f"上帝视角判断：{review['classification']}。",
         ])
 
@@ -874,13 +890,20 @@ class _QuestLineReasoningLayer(_QuestLineCore):
 
         if facts.get("confirmed") or facts.get("excluded"):
             parts.append("本轮新增事实：")
+            direct_confirmed = list(guess) if sum(feedback) == CODE_LEN else []
+            direct_excluded = list(guess) if sum(feedback) == 0 else []
             if facts.get("confirmed"):
-                parts.append(f"- 保留：{self._format_digits(facts['confirmed'])}。")
+                direct = [digit for digit in facts["confirmed"] if digit in direct_confirmed]
+                inferred = [digit for digit in facts["confirmed"] if digit not in direct]
+                if direct:
+                    parts.append(f"- 显式证据（反馈）：{self._format_digits(direct)} 被本轮反馈明确保留。")
+                if inferred:
+                    parts.append(f"- 结果集归纳确认：{self._format_digits(inferred)}；它们是结合全部历史反馈后，在所有剩余世界中都被保留下来。")
             if facts.get("excluded"):
-                direct = [digit for digit in facts["excluded"] if digit in guess]
+                direct = [digit for digit in facts["excluded"] if digit in direct_excluded]
                 inferred = [digit for digit in facts["excluded"] if digit not in direct]
                 if direct:
-                    parts.append(f"- 直接证据排除：{self._format_digits(direct)}。")
+                    parts.append(f"- 显式证据（反馈）：{self._format_digits(direct)} 被本轮反馈明确排除。")
                 if inferred:
                     parts.append(f"- 结果集归纳排除：{self._format_digits(inferred)}；它们不是被某一轮单独点名，而是在全局一致性检验后消失。")
         else:
@@ -912,7 +935,9 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         else:
             parts.append("位置盘面：当前仍以身份判断为主，位置证据暂未形成可独立行动的锚点。")
 
-        if recommendations:
+        if event.get("type") == "solution_revealed":
+            parts.append("本轮已经验证上一轮锁定的唯一世界；不再需要新的组队建议。")
+        elif recommendations and after.get("candidate_count", 0) > 1:
             proposals = []
             for item in recommendations:
                 action = item.get("action", {})
@@ -929,6 +954,8 @@ class _QuestLineReasoningLayer(_QuestLineCore):
                 }.get(reason, reason)
                 proposals.append(f"{item.get('guess')}（{reason}）")
             parts.append("下一轮组队建议：" + "；".join(proposals) + "。这些方案来自当前候选集的同一轮评分，分别代表不同的拆分取向；请玩家决定采用哪一队。")
+        elif after.get("candidate_count", 0) == 1:
+            parts.append("下一轮组队建议：逻辑上已经锁定唯一世界；可以直接验证当前唯一候选，不再进行新的候选拆分。")
         else:
             parts.append("下一轮组队建议：当前没有可行方案，需要先检查反馈是否互相矛盾。")
         return "\n".join(parts)
