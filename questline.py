@@ -590,21 +590,25 @@ class _QuestLineCore:
     def _transition_narrative(title: str, guess: Code, action: Dict[str, object], feedback: Feedback, before: Dict[str, object], after: Dict[str, object], changes: Dict[str, List[str]], position_changes: Dict[str, List[Dict[str, object]]], old_task: str, new_task: str, rationale: str) -> str:
         parts = [f"{title}：因为{rationale}行动 {guess}，得到 {fb_to_str(feedback)}。"]
         if changes["confirmed"]:
-            parts.append(f"数字 {''.join(changes['confirmed'])} 在剩余世界中已基本确认。")
+            parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['confirmed'])} 在剩余世界中已基本确认。")
         if changes["excluded"]:
-            parts.append(f"数字 {''.join(changes['excluded'])} 被当前证据排除。")
+            parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['excluded'])} 被当前证据排除。")
             exposed = [
                 digit for digit in changes["excluded"]
                 if before.get("digit_status", {}).get(digit, {}).get("status") in {"likely", "confirmed"}
             ]
             if exposed:
-                parts.append(f"数字 {''.join(exposed)} 此前曾进入可信解释，本轮伪装破裂。")
+                parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(exposed)} 此前曾进入可信解释，本轮伪装破裂。")
         if changes["weakened"]:
-            parts.append(f"数字 {''.join(changes['weakened'])} 的支持度下降。")
-        if changes.get("support_risen"):
-            parts.append(f"数字 {''.join(changes['support_risen'])} 在候选世界中的支持上升，但这还不等于身份确认。")
+            parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['weakened'])} 的支持度下降。")
+        support_risen = [
+            digit for digit in changes.get("support_risen", [])
+            if digit not in changes.get("confirmed", []) and digit not in changes.get("excluded", [])
+        ]
+        if support_risen:
+            parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(support_risen)} 在候选世界中的支持上升，但这还不等于身份确认。")
         if changes.get("support_fallen"):
-            parts.append(f"数字 {''.join(changes['support_fallen'])} 在候选世界中的支持下降。")
+            parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['support_fallen'])} 在候选世界中的支持下降。")
         strengthened_positions = position_changes["strengthened"] + position_changes["confirmed"]
         weakened_positions = position_changes["weakened"] + position_changes["excluded"]
         if strengthened_positions:
@@ -648,7 +652,13 @@ class _QuestLineCore:
                 if support:
                     strong = max(support, key=support.get)
                     weak = min(support, key=support.get)
-                    split_details.append(f"{group} 内部暂偏向 {strong}，{weak} 仍待排除")
+                    weak_status = after.get("digit_status", {}).get(weak, {}).get("status")
+                    if weak_status == "excluded":
+                        split_details.append(f"{group} 内部证据已经完成拆分：{strong} 被保留，{weak} 被排除")
+                    elif weak_status == "confirmed":
+                        split_details.append(f"{group} 内部证据已经完成确认：{strong} 与 {weak} 均被保留")
+                    else:
+                        split_details.append(f"{group} 内部暂偏向 {strong}，{weak} 仍待排除")
                 else:
                     split_details.append(group)
             parts.append(f"组内证据分化：{'；'.join(split_details)}。")
@@ -722,6 +732,10 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         self.chapters: List[Dict[str, object]] = []
         self.digit_index: DefaultDict[str, List[int]] = defaultdict(list)
         self.group_index: DefaultDict[str, List[int]] = defaultdict(list)
+
+    @staticmethod
+    def _format_digits(digits: Iterable[str]) -> str:
+        return "、".join(str(digit) for digit in digits)
 
     @classmethod
     def from_history(cls, history: History, solver: Optional[QuestLineSolver] = None) -> "StoryBook":
@@ -921,6 +935,8 @@ class StoryBook(_QuestLineReasoningLayer):
             lines.extend(["", "案件结论：反馈已经确认答案，调查结束。"])
         elif final["after"].get("candidate_count") == 0:
             lines.extend(["", "案件状态：反馈与现有证据冲突，需要检查输入或重新审理。"])
+        elif final["after"].get("candidate_count") == 1:
+            lines.extend(["", "案件状态：逻辑上已经锁定唯一世界，等待最终反馈确认。"])
         else:
             lines.extend(["", f"案件状态：仍有 {final['after'].get('candidate_count')} 个可能世界，调查尚未结束。"])
 
@@ -1012,12 +1028,12 @@ class StoryBook(_QuestLineReasoningLayer):
                         group_support = after.get("group_relations", {}).get(group, {}).get("support", {})
                         strong = max(group_support, key=group_support.get)
                         weak = min(group_support, key=group_support.get)
-                        if digit == strong:
+                        if digit == strong and after.get("digit_status", {}).get(weak, {}).get("status") not in {"excluded", "confirmed"}:
                             entries.append(
                                 f"第{event['round']}轮，{group} 内部证据分化；{digit} 暂时成为较强解释，"
                                 f"但仍需等待对数字 {weak} 的排除。"
                             )
-                        elif digit == weak:
+                        elif digit == weak and status not in {"excluded", "confirmed"}:
                             entries.append(
                                 f"第{event['round']}轮，{group} 内部证据分化；{digit} 的解释被置于较弱位置，"
                                 f"尚未完成排除。"
