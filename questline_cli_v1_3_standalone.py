@@ -620,7 +620,8 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
             print("\n案件告破。" if lang == "zh" else "\nCase solved.")
             print(session.story.render_audit())
             return True
-        print(session.read_story())
+        print("\n本轮案情摘要：" if lang == "zh" else "\nCurrent case summary:")
+        print(session.story.render_current_facts())
         print_adventure_situation(session, lang)
 
 
@@ -642,19 +643,46 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
     print("\n[推演模式]" if lang == "zh" else "\n[Simulation mode]")
     print("答案已锁定，由引擎负责推进调查。" if lang == "zh" else "The answer is locked; the engine will lead the investigation.")
     for _ in range(max_steps):
-        result = solver.choose(session.history, top_k=3)
-        options = result.get("recommendations", [])[:3]
+        result = solver.choose(session.history, top_k=6)
+        options = result.get("recommendations", [])[:6]
         if not options:
             break
-        selected = options[0]
-        if len(options) > 1 and random.random() < 0.35:
-            selected = random.choice(options[1:])
         if lang == "zh":
             considered = "、".join(str(item.get("guess")) for item in options)
-            print(f"\n侦探研判：考虑 {considered} 几种方案，选择 {selected['guess']}。")
+            print(f"\n侦探研判：当前考虑 {considered}。")
+            for index, item in enumerate(options, 1):
+                reason = item.get("reason") or item.get("action", {}).get("reason") or "推进当前调查"
+                print(f"  {index}. {item.get('guess')}：{reason}")
+            print("输入 y/0 让侦探决定，或输入 1-6 选择方案；也可输入 book 查看累计案情。")
         else:
             considered = ", ".join(str(item.get("guess")) for item in options)
-            print(f"\nDetective reasoning: considering {considered}; choosing {selected['guess']}.")
+            print(f"\nDetective reasoning: considering {considered}.")
+            print("Enter y/0 for the detective's choice, 1-6 to choose a plan, or book for the cumulative case.")
+        while True:
+            try:
+                choice = input("> ").strip().lower()
+            except EOFError:
+                choice = "y"
+            if choice in {"book", "story"}:
+                print(session.read_story())
+                continue
+            if choice in {"book full", "book+", "audit"}:
+                print(session.story.render_audit())
+                continue
+            if choice in {"r", "report"}:
+                print_adventure_guidance(session, solver, lang)
+                continue
+            if choice in {"y", "yes", "0", ""}:
+                selected = options[0]
+                break
+            if choice.isdigit() and 1 <= int(choice) <= len(options):
+                selected = options[int(choice) - 1]
+                break
+            print("请输入 y/0 或 1-6。" if lang == "zh" else "Enter y/0 or a plan number from 1-6.")
+        if lang == "zh":
+            print(f"侦探选择：{selected['guess']}。")
+        else:
+            print(f"Detective chooses: {selected['guess']}.")
         event = session.apply_turn(selected["guess"], solver.feedback(answer, selected["guess"]), source="QuestLine")
         guess = event["action"]["guess"]
         feedback = questline.parse_feedback(event["action"]["feedback"])
@@ -663,7 +691,8 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
         if feedback == (4, 0):
             print(session.story.render_audit())
             return True
-        print(session.read_story())
+        print("\n本轮案情摘要：" if lang == "zh" else "\nCurrent case summary:")
+        print(session.story.render_current_facts())
     print("达到探索步数上限。" if lang == "zh" else "Exploration step limit reached.")
     print(session.story.render_audit())
     return False

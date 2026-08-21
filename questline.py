@@ -599,6 +599,12 @@ class _QuestLineCore:
             ]
             if exposed:
                 parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(exposed)} 此前曾进入可信解释，本轮伪装破裂。")
+        excluded_now = [
+            digit for digit in DIGITS
+            if after.get("digit_status", {}).get(digit, {}).get("status") == "excluded"
+        ]
+        if excluded_now and (changes["excluded"] or changes.get("confirmed")):
+            parts.append(f"截至本轮，数字 {_QuestLineReasoningLayer._format_digits(excluded_now)} 已从答案解释中排除；调查重点转向剩余数字的组合与顺序。")
         if changes["weakened"]:
             parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['weakened'])} 的支持度下降。")
         support_risen = [
@@ -617,6 +623,19 @@ class _QuestLineCore:
         if weakened_positions:
             details = "、".join(f"{item['digit']}×第{item['position'] + 1}位" for item in weakened_positions[:3])
             parts.append(f"位置解释被削弱：{details}。")
+        confirmed_position_facts = []
+        excluded_position_facts = []
+        for digit in DIGITS:
+            position_status = after.get("digit_status", {}).get(digit, {}).get("position_status", [])
+            for position, status in enumerate(position_status):
+                if status == "confirmed":
+                    confirmed_position_facts.append(f"{digit}→第{position + 1}位")
+                elif status == "excluded":
+                    excluded_position_facts.append(f"{digit}×第{position + 1}位")
+        if confirmed_position_facts:
+            parts.append(f"目前已锁定的位置：{'、'.join(confirmed_position_facts[:6])}。")
+        if excluded_position_facts and (position_changes["excluded"] or changes["excluded"]):
+            parts.append(f"目前已排除的位置：{'、'.join(excluded_position_facts[:8])}。")
         if after.get("group_relations"):
             group_events = []
             for group in GROUP_ORDER:
@@ -927,6 +946,10 @@ class StoryBook(_QuestLineReasoningLayer):
         else:
             lines.extend(["", f"案件状态：仍有 {final['after'].get('candidate_count')} 个可能世界，调查尚未结束。"])
 
+        facts = self.render_current_facts()
+        if facts:
+            lines.extend(["", "## 当前已知事实", facts])
+
         if audit:
             arc = self.render_identity_arc()
             if arc:
@@ -938,6 +961,54 @@ class StoryBook(_QuestLineReasoningLayer):
         if audit or include_indexes:
             lines.extend(["", "## 角色索引", self.render_digit_index()])
             lines.extend(["", "## 阵营索引", self.render_group_index()])
+        return "\n".join(lines)
+
+    def render_current_facts(self) -> str:
+        """Render the latest factual readout for the readable case book."""
+        if not self.events:
+            return ""
+        after = self.events[-1].get("after", {})
+        status_map = after.get("digit_status", {})
+        confirmed = [digit for digit in DIGITS if status_map.get(digit, {}).get("status") == "confirmed"]
+        excluded = [digit for digit in DIGITS if status_map.get(digit, {}).get("status") == "excluded"]
+        unresolved = [digit for digit in DIGITS if digit not in confirmed and digit not in excluded]
+        confirmed_positions = []
+        excluded_positions = []
+        for digit in DIGITS:
+            for position, status in enumerate(status_map.get(digit, {}).get("position_status", [])):
+                if status == "confirmed":
+                    confirmed_positions.append(f"{digit}→第{position + 1}位")
+                elif status == "excluded":
+                    excluded_positions.append(f"{digit}×第{position + 1}位")
+
+        lines = []
+        if confirmed:
+            lines.append(f"已锁定数字：{self._format_digits(confirmed)}。")
+        if excluded:
+            lines.append(f"已淘汰数字：{self._format_digits(excluded)}。")
+        if unresolved:
+            lines.append(f"尚未定案数字：{self._format_digits(unresolved)}。")
+        if confirmed_positions:
+            lines.append(f"已锁定位置：{'、'.join(confirmed_positions)}。")
+        if excluded_positions:
+            lines.append(f"已排除位置：{'、'.join(excluded_positions)}。")
+        if len(confirmed) == CODE_LEN:
+            lines.append("数字身份已经确定，当前重点是安排四个数字的正确顺序。")
+        elif confirmed and excluded:
+            lines.append("调查重点：先保留已确认数字，再用位置证据安排它们的顺序。")
+        task = after.get("task")
+        task_labels = {
+            "establish_foundation": "建立基础事实",
+            "introduce_45": "引入 45 组",
+            "investigate_outer_groups": "调查外围组",
+            "cross_test_new_group": "交叉测试新组",
+            "converge_outer_choice": "收束外围解释",
+            "resolve_group_conflict": "解决组内冲突",
+            "apply_position_pressure": "验证数字位置",
+            "resolve_endgame": "收束残局",
+        }
+        if task:
+            lines.append(f"当前调查任务：{task_labels.get(task, task)}。")
         return "\n".join(lines)
 
     def render_audit(self) -> str:
