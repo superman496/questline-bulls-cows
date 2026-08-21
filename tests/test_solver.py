@@ -375,6 +375,21 @@ def test_story_book_5621_case_keeps_group_split_single_and_explicit():
     assert "案件结论：反馈已经确认答案，调查结束。" in rendered
 
 
+def test_story_book_readable_render_exposes_current_facts_and_order_task():
+    solver = QuestLineSolver(use_cache=False)
+    book = StoryBook.from_history([
+        ("0123", "1b2c"),
+        ("0245", "1b1c"),
+        ("0672", "0b1c"),
+        ("1253", "2b2c"),
+    ], solver=solver)
+    rendered = book.render()
+    assert "已淘汰数字：0、4、6、7、8、9。" in rendered
+    assert "已锁定数字：1、2、3、5。" in rendered
+    assert "数字身份已经确定，当前重点是安排四个数字的正确顺序。" in rendered
+    assert "已锁定位置：" in rendered
+
+
 def test_game_session_assist_uses_shared_transition_pipeline():
     session = GameSession(mode="assist", solver=QuestLineSolver(use_cache=False))
     event = session.apply_turn("0123", "0b1c", source="Manual")
