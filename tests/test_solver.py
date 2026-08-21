@@ -304,7 +304,7 @@ def test_story_book_renders_case_and_indexes():
         ("9785", "2b1c"),
         ("6789", "4b0c"),
     ], solver=solver)
-    rendered = book.render(include_indexes=True)
+    rendered = book.render_audit()
     assert "《QuestLine 案件记录》" in rendered
     assert "## 核心事实" in rendered
     assert "## 终章：破案" in rendered
@@ -322,7 +322,7 @@ def test_story_book_preserves_identity_turning_points():
         ("9680", "0b0c"),
         ("5274", "0b3c"),
     ], solver=solver)
-    rendered = book.render()
+    rendered = book.render_audit()
     assert "伪装破裂" in rendered
     assert "组内证据分化" in rendered
     assert "01 的共同解释被证据整体排除" in rendered
@@ -330,6 +330,49 @@ def test_story_book_preserves_identity_turning_points():
     assert "数字 1" in rendered and "从未成为可信身份" in rendered
     assert "身份认知轨迹" in rendered
     assert "数字 3" in rendered
+
+
+def test_story_book_default_is_readable_and_audit_is_explicit():
+    solver = QuestLineSolver(use_cache=False)
+    book = StoryBook.from_history([
+        ("0123", "0b1c"),
+        ("1045", "0b2c"),
+        ("6470", "1b1c"),
+    ], solver=solver)
+    readable = book.render()
+    audit = book.render_audit()
+    assert "## 身份认知轨迹" not in readable
+    assert "## 数字角色档案" not in readable
+    assert "## 身份认知轨迹" in audit
+    assert "## 数字角色档案" in audit
+
+
+def test_story_book_does_not_invent_uninvestigated_group_turns():
+    solver = QuestLineSolver(use_cache=False)
+    book = StoryBook.from_history([
+        ("0123", "1b1c"),
+        ("0145", "0b2c"),
+    ], solver=solver)
+    rendered = book.render()
+    assert "67:symmetric→unresolved" not in rendered
+    assert "89:symmetric→unresolved" not in rendered
+    assert "解释重新进入可信范围，但尚不能确认组内成员" in rendered
+
+
+def test_story_book_5621_case_keeps_group_split_single_and_explicit():
+    solver = QuestLineSolver(use_cache=False)
+    book = StoryBook.from_history([
+        ("0123", "1b1c"),
+        ("0145", "0b2c"),
+        ("6713", "0b2c"),
+        ("1426", "1b2c"),
+        ("5621", "4b0c"),
+    ], solver=solver)
+    rendered = book.render()
+    assert "数字 0、3、8、9 被当前证据排除" in rendered
+    assert "01 内部证据已经完成拆分：1 被保留，0 被排除" in rendered
+    assert rendered.count("组 01 的证据已经完成拆分") == 0
+    assert "案件结论：反馈已经确认答案，调查结束。" in rendered
 
 
 def test_game_session_assist_uses_shared_transition_pipeline():
