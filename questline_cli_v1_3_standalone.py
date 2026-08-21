@@ -430,8 +430,9 @@ def print_help(lang: str) -> None:
     print("  411      -> #4 + 1b1c")
     print("  932840   -> manual 9328 + 4b0c")
     print("  9328 4 0 -> manual 9328 + 4b0c")
-    print("  story    -> read the current case book")
-    print("  book     -> read the current case book")
+    print("  story    -> read the readable case book")
+    print("  book     -> read the readable case book")
+    print("  book full -> read the complete audit case book")
     print("  save     -> save the current replay JSON")
     print("  replay   -> print structured replay JSON")
     print("  export   -> export the current case as Markdown")
@@ -448,10 +449,10 @@ def print_history(history: History, lang: str) -> None:
         print(f"  {i}. {g} -> {fb_text(fb)}")
 
 
-def print_story(history: History, solver: Any, lang: str, include_indexes: bool = True) -> None:
-    """Print the readable case book for the current investigation history."""
+def print_story(history: History, solver: Any, lang: str, audit: bool = False) -> None:
+    """Print the readable book, or the complete audit book when requested."""
     book = questline.StoryBook.from_history(history, solver=solver)
-    print(book.render(include_indexes=include_indexes))
+    print(book.render_audit() if audit else book.render())
 
 
 def save_case_json(history: History, replay: ReplayRows, solver: Any, lang: str) -> Path:
@@ -471,7 +472,7 @@ def save_case_json(history: History, replay: ReplayRows, solver: Any, lang: str)
 def export_case_markdown(history: History, solver: Any) -> Path:
     path = Path(f"questline_case_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
     path.write_text(
-        questline.StoryBook.from_history(history, solver=solver).render(include_indexes=True),
+        questline.StoryBook.from_history(history, solver=solver).render_audit(),
         encoding="utf-8",
     )
     return path
@@ -526,7 +527,10 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         if low in {"q", "quit", "exit"}:
             return False
         if low in {"story", "book"}:
-            print(session.read_story(include_indexes=True))
+            print(session.read_story())
+            continue
+        if low in {"book full", "book+", "audit"}:
+            print(session.story.render_audit())
             continue
         if low in {"h", "help", "?"}:
             print("输入 4 位不重复数字；story/book 查看故事；q 退出。" if lang == "zh" else "Enter four distinct digits; story/book reads the case; q quits.")
@@ -545,7 +549,7 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         print(event["narrative"])
         if feedback == (4, 0):
             print("\n案件告破。" if lang == "zh" else "\nCase solved.")
-            print(session.read_story(include_indexes=True))
+            print(session.read_story())
             return True
 
 
@@ -573,7 +577,7 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
         print(f"\n第 {session.round} 轮：引擎选择 {guess}，反馈 {fb_text(feedback)}" if lang == "zh" else f"\nRound {session.round}: engine chose {guess}, feedback {fb_text(feedback)}")
         print(event["narrative"])
         if feedback == (4, 0):
-            print(session.read_story(include_indexes=True))
+            print(session.read_story())
             return True
         try:
             command = input("回车继续，story 查看故事，q 退出: ").strip().lower()
@@ -582,9 +586,11 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
         if command in {"q", "quit", "exit"}:
             return False
         if command in {"story", "book"}:
-            print(session.read_story(include_indexes=True))
+            print(session.read_story())
+        elif command in {"book full", "book+", "audit"}:
+            print(session.story.render_audit())
     print("达到探索步数上限。" if lang == "zh" else "Exploration step limit reached.")
-    print(session.read_story(include_indexes=True))
+    print(session.read_story())
     return False
 
 
@@ -926,6 +932,8 @@ def solved_flow(history: History, replay: ReplayRows, solver: Any, lang: str, ja
     print(tr(lang, "solved"))
     print(solved_in_text(lang, len(history)))
     print_history(history, lang)
+    print("\n[完整审计版案件记录]")
+    print_story(history, solver, lang, audit=True)
     if ask_yes_no(tr(lang, "save_prompt"), lang, default_yes=False, solved_context=True):
         print(tr(lang, "saved", path=save_replay(history, replay, solver, jackpot, lang)))
     else:
@@ -988,6 +996,7 @@ def game_loop(lang: str, solver: Any, debug: bool = False) -> bool:
                 continue
             if low in {"h", "history"}: print_history(history, lang); continue
             if low in {"story", "book"}: print_story(history, solver, lang); continue
+            if low in {"book full", "book+", "audit"}: print_story(history, solver, lang, audit=True); continue
             if handle_case_command(low, history, replay, solver, lang): continue
             replaced = try_replace_last(raw, history, replay, solver, lang)
             if replaced is not None: return replaced
@@ -1004,6 +1013,7 @@ def game_loop(lang: str, solver: Any, debug: bool = False) -> bool:
         if low in {"help", "?"}: print_help(lang); continue
         if low in {"h", "history"}: print_history(history, lang); continue
         if low in {"story", "book"}: print_story(history, solver, lang); continue
+        if low in {"book full", "book+", "audit"}: print_story(history, solver, lang, audit=True); continue
         if low in {"r", "report"}: print_report(solver, history, lang, state); continue
         if handle_case_command(low, history, replay, solver, lang): continue
         if low in {"undo", "back"}:

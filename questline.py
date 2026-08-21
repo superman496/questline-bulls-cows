@@ -620,6 +620,10 @@ class _QuestLineCore:
         if after.get("group_relations"):
             group_events = []
             for group in GROUP_ORDER:
+                before_tested = before.get("group_states", {}).get(group, {}).get("tested", False)
+                after_tested = after.get("group_states", {}).get(group, {}).get("tested", False)
+                if not (before_tested or after_tested):
+                    continue
                 before_relation = before.get("group_relations", {}).get(group, {}).get("relation")
                 after_relation = after.get("group_relations", {}).get(group, {}).get("relation")
                 if before_relation != after_relation:
@@ -637,7 +641,7 @@ class _QuestLineCore:
             elif after_status == "full":
                 group_status_events.append(f"{group} 的共同解释获得完整支持")
             elif after_status == "present" and before_status in {"unobserved", "unresolved", "contested"}:
-                group_status_events.append(f"{group} 整体重新进入可信解释")
+                group_status_events.append(f"{group} 的解释重新进入可信范围，但尚不能确认组内成员")
         if group_status_events:
             parts.append(f"组级判断：{'；'.join(group_status_events)}。")
         split_groups = []
@@ -662,15 +666,6 @@ class _QuestLineCore:
                 else:
                     split_details.append(group)
             parts.append(f"组内证据分化：{'；'.join(split_details)}。")
-        for group in GROUP_ORDER:
-            relation = after.get("group_relations", {}).get(group, {}).get("relation")
-            if relation != "one_strong_one_weak":
-                continue
-            support = after.get("group_relations", {}).get(group, {}).get("support", {})
-            strong = max(support, key=support.get)
-            weak = min(support, key=support.get)
-            if support.get(strong, 0.0) >= 0.98:
-                parts.append(f"组 {group} 的证据已经完成拆分：{strong} 被保留，{weak} 被排除。")
         if after.get("candidate_count") != before.get("candidate_count"):
             parts.append(f"结果空间从 {before.get('candidate_count')} 缩小到 {after.get('candidate_count')}。")
         if old_task != new_task:
@@ -911,8 +906,8 @@ class StoryBook(_QuestLineReasoningLayer):
         "confirmed": "身份锁定",
     }
 
-    def render(self, include_indexes: bool = False) -> str:
-        """Render the investigation as a readable Chinese case book."""
+    def render(self, include_indexes: bool = False, audit: bool = False) -> str:
+        """Render either the readable case book or the complete audit record."""
         if not self.events:
             return "《QuestLine 案件记录》\n\n案件尚未开始。"
 
@@ -921,14 +916,6 @@ class StoryBook(_QuestLineReasoningLayer):
             lines.extend(["", f"## {chapter['title']}"])
             for event_index in chapter["event_indexes"]:
                 lines.append(self.events[event_index]["narrative"])
-
-        arc = self.render_identity_arc()
-        if arc:
-            lines.extend(["", "## 身份认知轨迹", arc])
-
-        characters = self.render_character_stories()
-        if characters:
-            lines.extend(["", "## 数字角色档案", characters])
 
         final = self.events[-1]
         if final["type"] == "solution_revealed":
@@ -940,10 +927,22 @@ class StoryBook(_QuestLineReasoningLayer):
         else:
             lines.extend(["", f"案件状态：仍有 {final['after'].get('candidate_count')} 个可能世界，调查尚未结束。"])
 
-        if include_indexes:
+        if audit:
+            arc = self.render_identity_arc()
+            if arc:
+                lines.extend(["", "## 身份认知轨迹", arc])
+            characters = self.render_character_stories()
+            if characters:
+                lines.extend(["", "## 数字角色档案", characters])
+
+        if audit or include_indexes:
             lines.extend(["", "## 角色索引", self.render_digit_index()])
             lines.extend(["", "## 阵营索引", self.render_group_index()])
         return "\n".join(lines)
+
+    def render_audit(self) -> str:
+        """Render the complete case record for post-game review."""
+        return self.render(audit=True)
 
     def render_identity_arc(self) -> str:
         """Summarize how trust in each digit evolved across the case."""
