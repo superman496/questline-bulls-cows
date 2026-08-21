@@ -536,6 +536,7 @@ class _QuestLineCore:
                 "task": old_task,
                 "main_world": old_main,
                 "digit_support": before.get("digit_support", {}),
+                "digit_position_support": before.get("digit_position_support", {}),
                 "digit_status": before.get("digit_status", {}),
                 "group_states": before.get("group_states", {}),
                 "group_relations": before.get("group_relations", {}),
@@ -545,6 +546,7 @@ class _QuestLineCore:
                 "task": new_task,
                 "main_world": new_main,
                 "digit_support": after.get("digit_support", {}),
+                "digit_position_support": after.get("digit_position_support", {}),
                 "digit_status": after.get("digit_status", {}),
                 "group_states": after.get("group_states", {}),
                 "group_relations": after.get("group_relations", {}),
@@ -635,12 +637,8 @@ class _QuestLineCore:
             item for item in position_changes["weakened"] + position_changes["excluded"]
             if item.get("digit") in active_digits
         ]
-        if strengthened_positions:
-            details = "、".join(f"{item['digit']}→第{item['position'] + 1}位" for item in strengthened_positions[:3])
-            parts.append(f"位置证据增强：{details}。")
-        if weakened_positions:
-            details = "、".join(f"{item['digit']}×第{item['position'] + 1}位" for item in weakened_positions[:3])
-            parts.append(f"位置解释被削弱：{details}。")
+        if strengthened_positions or weakened_positions:
+            parts.append("位置盘面更新：\n" + "\n".join(_QuestLineReasoningLayer._position_board(after)))
         confirmed_position_facts = []
         excluded_position_facts = []
         for digit in active_digits:
@@ -650,10 +648,6 @@ class _QuestLineCore:
                     confirmed_position_facts.append(f"{digit}→第{position + 1}位")
                 elif status == "excluded":
                     excluded_position_facts.append(f"{digit}×第{position + 1}位")
-        if confirmed_position_facts:
-            parts.append(f"目前已锁定的位置：{'、'.join(confirmed_position_facts[:6])}。")
-        if excluded_position_facts and (position_changes["excluded"] or changes["excluded"]):
-            parts.append(f"目前已排除的位置：{'、'.join(excluded_position_facts[:8])}。")
         if after.get("group_relations"):
             group_events = []
             for group in GROUP_ORDER:
@@ -706,7 +700,7 @@ class _QuestLineCore:
         if after.get("candidate_count") != before.get("candidate_count"):
             parts.append(f"结果空间从 {before.get('candidate_count')} 缩小到 {after.get('candidate_count')}。")
         if old_task != new_task:
-            parts.append(f"调查从 {old_task} 转向 {new_task}。")
+            parts.append(f"调查转向：{_QuestLineReasoningLayer.public_task(new_task)}。")
         return "".join(parts)
 
     def _candidate_base_weight(self, code: Code, stats: Dict[str, object]) -> float:
@@ -757,6 +751,50 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         "apply_position_pressure": ("position_evidence", "位置证据"),
         "resolve_endgame": ("convergence", "收束"),
     }
+
+    PUBLIC_TASKS = {
+        "establish_foundation": "建立第一层参照",
+        "introduce_45": "扩大调查范围",
+        "investigate_outer_groups": "寻找外围线索",
+        "cross_test_new_group": "交叉验证新线索",
+        "converge_outer_choice": "收束外围分歧",
+        "resolve_group_conflict": "拆解数字关系",
+        "apply_position_pressure": "施加位置压力",
+        "resolve_endgame": "验证残局排列",
+    }
+
+    @classmethod
+    def public_task(cls, task: Optional[str]) -> str:
+        return cls.PUBLIC_TASKS.get(task, "继续调查")
+
+    @staticmethod
+    def _position_board(state: Dict[str, object], limit: int = 3) -> List[str]:
+        status_map = state.get("digit_status", {})
+        support_map = state.get("digit_position_support", {})
+        rows = []
+        for position in range(CODE_LEN):
+            excluded = []
+            possible = []
+            confirmed = []
+            for digit in DIGITS:
+                digit_state = status_map.get(digit, {})
+                if digit_state.get("status") == "excluded":
+                    continue
+                position_status = digit_state.get("position_status", [])
+                status = position_status[position] if position < len(position_status) else "possible"
+                if status == "excluded":
+                    excluded.append(digit)
+                elif status == "confirmed":
+                    confirmed.append(digit)
+                else:
+                    supports = support_map.get(digit) or digit_state.get("position_support", [])
+                    possible.append((supports[position] if position < len(supports) else 0.0, digit))
+            possible.sort(reverse=True)
+            labels = [f"{digit}（{support:.0%}）" for support, digit in possible[:limit]]
+            if confirmed:
+                labels = [f"{digit}（锁定）" for digit in confirmed] + labels
+            rows.append(f"第{position + 1}位：排除 {'、'.join(excluded) if excluded else '无'}；当前靠前 {'、'.join(labels) if labels else '无'}")
+        return rows
 
     def __init__(self, solver: Optional[QuestLineSolver] = None) -> None:
         self.solver = solver or QuestLineSolver()
@@ -907,7 +945,22 @@ class _QuestLineReasoningLayer(_QuestLineCore):
                 if inferred:
                     parts.append(f"- 结果集归纳排除：{self._format_digits(inferred)}；它们不是被某一轮单独点名，而是在全局一致性检验后消失。")
         else:
-            parts.append("本轮没有产生新的身份定论，主要影响落在候选世界的重新分层。")
+            before_count = before.get("candidate_count", 0)
+            after_count = after.get("candidate_count", 0)
+            position_changes = position_facts.get("confirmed", []) + position_facts.get("strengthened", [])
+            if position_changes and after_count < before_count:
+                parts.append(
+                    f"本轮没有新增身份定论，但位置盘面开始收紧；候选世界从 {before_count} 个缩小到 {after_count} 个，"
+                    "下一步应优先利用这些位置压力，而不是重复确认数字身份。"
+                )
+            elif after_count < before_count:
+                parts.append(
+                    f"本轮没有新增身份定论，但全局一致性检验排除了部分世界；候选世界从 {before_count} 个缩小到 {after_count} 个。"
+                )
+            elif position_changes:
+                parts.append("本轮身份没有新增定论，但位置证据有所增强；暂不把位置倾向误读成身份确认。")
+            else:
+                parts.append("本轮没有产生新的身份定论，现有证据主要在重新排列候选世界的可信度。")
 
         if len(confirmed) == CODE_LEN:
             parts.append(f"全局判断：{self._format_digits(confirmed)} 已组成唯一数字集合；身份调查结束，剩下的是位置排布。")
@@ -916,20 +969,12 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         else:
             parts.append("全局判断：身份仍然开放，下一轮应优先制造数字集合之间的区分，而不是过早锁定某条主线。")
 
-        active = [digit for digit in DIGITS if digit not in excluded]
-        position_lines = []
-        for digit in active:
-            supports = after.get("digit_status", {}).get(digit, {}).get("position_support", [])
-            if not supports:
-                continue
-            best = max(range(len(supports)), key=lambda index: supports[index])
-            worst = min(range(len(supports)), key=lambda index: supports[index])
-            if supports[best] >= 0.65:
-                position_lines.append(f"{digit} 更适合第{best + 1}位（{supports[best]:.0%}）")
-            elif supports[best] - supports[worst] >= 0.25:
-                position_lines.append(f"{digit} 暂偏向第{best + 1}位（{supports[best]:.0%}），不宜优先放在第{worst + 1}位（{supports[worst]:.0%}）")
-        if position_lines:
-            parts.append("位置盘面：" + "；".join(position_lines[:4]) + "。")
+        if before.get("task") != after.get("task"):
+            parts.append(f"调查方向转向：{self.public_task(after.get('task'))}。")
+
+        position_lines = self._position_board(after)
+        if position_facts.get("strengthened") or position_facts.get("confirmed") or position_facts.get("excluded"):
+            parts.append("位置盘面：\n" + "\n".join(position_lines))
         elif position_facts.get("strengthened") or position_facts.get("confirmed"):
             parts.append("位置盘面：本轮出现位置变化，但还不足以形成稳定的排布建议。")
         else:
@@ -944,8 +989,8 @@ class _QuestLineReasoningLayer(_QuestLineCore):
                 reason = item.get("reason") or action.get("reason") or action.get("type", "继续拆分")
                 reason = {
                     "fixed first guess": "建立基础事实",
-                    "opening book: stable AVG second move": "引入 45 组，建立共同参照",
-                    "introduces untested groups": "引入尚未调查的小组",
+                    "opening book: stable AVG second move": "扩大调查范围，建立共同参照",
+                    "introduces untested groups": "寻找尚未调查的线索",
                     "reuses tested digits in new positions": "复用已知数字，施加位置压力",
                     "tests a remaining candidate directly": "直接验证残局候选",
                     "tests a remaining candidate": "测试仍在候选空间中的答案",
@@ -1159,8 +1204,6 @@ class StoryBook(_QuestLineReasoningLayer):
             for position, status in enumerate(status_map.get(digit, {}).get("position_status", [])):
                 if status == "confirmed":
                     confirmed_positions.append(f"{digit}→第{position + 1}位")
-                elif status == "excluded":
-                    excluded_positions.append(f"{digit}×第{position + 1}位")
 
         lines = []
         if confirmed:
@@ -1171,25 +1214,14 @@ class StoryBook(_QuestLineReasoningLayer):
             lines.append(f"尚未定案数字：{self._format_digits(unresolved)}。")
         if confirmed_positions:
             lines.append(f"已锁定位置：{'、'.join(confirmed_positions)}。")
-        if excluded_positions:
-            lines.append(f"已排除位置：{'、'.join(excluded_positions)}。")
+        lines.append("位置盘面：\n" + "\n".join(self._position_board(after)))
         if len(confirmed) == CODE_LEN:
             lines.append("数字身份已经确定，当前重点是安排四个数字的正确顺序。")
         elif confirmed and excluded:
             lines.append("调查重点：继续确定剩余数字的身份，并同步收集位置证据。")
         task = after.get("task")
-        task_labels = {
-            "establish_foundation": "建立基础事实",
-            "introduce_45": "引入 45 组",
-            "investigate_outer_groups": "调查外围组",
-            "cross_test_new_group": "交叉测试新组",
-            "converge_outer_choice": "收束外围解释",
-            "resolve_group_conflict": "解决组内冲突",
-            "apply_position_pressure": "验证数字位置",
-            "resolve_endgame": "收束残局",
-        }
         if task:
-            lines.append(f"当前调查任务：{task_labels.get(task, task)}。")
+            lines.append(f"当前调查任务：{self.public_task(task)}。")
         return "\n".join(lines)
 
     def render_audit(self) -> str:

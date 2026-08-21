@@ -546,14 +546,14 @@ def print_adventure_guidance(session: questline.GameSession, solver: Any, lang: 
     investigation = result.get("investigation") or {}
     candidates = solver.filter_candidates(session.history)
     task_labels = {
-        "establish_foundation": "建立基础事实",
-        "introduce_45": "引入 45 组",
-        "cross_test_new_group": "交叉测试新组",
-        "investigate_outer_groups": "调查外围组",
-        "converge_outer_choice": "选择性收束外围解释",
-        "resolve_group_conflict": "解决组内冲突",
-        "apply_position_pressure": "验证数字位置",
-        "resolve_endgame": "收束残局",
+        "establish_foundation": "建立第一层参照",
+        "introduce_45": "扩大调查范围",
+        "cross_test_new_group": "交叉验证新线索",
+        "investigate_outer_groups": "寻找外围线索",
+        "converge_outer_choice": "收束外围分歧",
+        "resolve_group_conflict": "拆解数字关系",
+        "apply_position_pressure": "施加位置压力",
+        "resolve_endgame": "验证残局排列",
     }
     task = investigation.get("task", "")
     print(f"当前剩余可能世界：{len(candidates)}" if lang == "zh" else f"Remaining worlds: {len(candidates)}")
@@ -586,14 +586,14 @@ def print_adventure_situation(session: questline.GameSession, lang: str) -> None
     state = session.current_state()
     investigation = state.get("investigation", {})
     task_labels = {
-        "establish_foundation": "建立基础事实",
-        "introduce_45": "引入 45 组",
-        "cross_test_new_group": "交叉测试新组",
-        "investigate_outer_groups": "调查外围组",
-        "converge_outer_choice": "选择性收束外围解释",
-        "resolve_group_conflict": "解决组内冲突",
-        "apply_position_pressure": "验证数字位置",
-        "resolve_endgame": "收束残局",
+        "establish_foundation": "建立第一层参照",
+        "introduce_45": "扩大调查范围",
+        "cross_test_new_group": "交叉验证新线索",
+        "investigate_outer_groups": "寻找外围线索",
+        "converge_outer_choice": "收束外围分歧",
+        "resolve_group_conflict": "拆解数字关系",
+        "apply_position_pressure": "施加位置压力",
+        "resolve_endgame": "验证残局排列",
     }
     if lang == "zh":
         print(f"局势判断：剩余 {state['candidate_count']} 个可能世界；当前任务是{task_labels.get(investigation.get('task'), investigation.get('task', '继续调查'))}。")
@@ -784,14 +784,14 @@ def strategy_state(result: Dict[str, Any], lang: str) -> str:
     investigation = result.get("investigation") or {}
     task = investigation.get("task")
     labels = {
-        "establish_foundation": "建立基础事实",
-        "introduce_45": "引入 45 组",
-        "investigate_outer_groups": "调查外围组",
-        "cross_test_new_group": "交叉测试新组",
-        "converge_outer_choice": "外围选择性收束",
-        "resolve_group_conflict": "解决组内冲突",
-        "apply_position_pressure": "验证数字位置",
-        "resolve_endgame": "残局直接验证",
+        "establish_foundation": "建立第一层参照",
+        "introduce_45": "扩大调查范围",
+        "investigate_outer_groups": "寻找外围线索",
+        "cross_test_new_group": "交叉验证新线索",
+        "converge_outer_choice": "收束外围分歧",
+        "resolve_group_conflict": "拆解数字关系",
+        "apply_position_pressure": "施加位置压力",
+        "resolve_endgame": "验证残局排列",
     }
     if task: return labels.get(task, task) if lang == "zh" else task
     return tr(lang, "normal")
@@ -880,10 +880,11 @@ def print_report(solver: Any, history: History, lang: str, state: CliState, reve
     investigation = result.get("investigation") or {}
     if investigation:
         task_labels = {
-            "establish_foundation": "建立基础事实",
-            "introduce_45": "引入 45 组",
-            "cross_test_new_group": "交叉测试并引入新组",
-            "investigate_outer_groups": "调查外围组",
+            "establish_foundation": "建立第一层参照",
+            "introduce_45": "扩大调查范围",
+            "cross_test_new_group": "交叉验证新线索",
+            "investigate_outer_groups": "寻找外围线索",
+            "converge_outer_choice": "收束外围分歧",
             "resolve_group_conflict": "解决组内冲突",
             "apply_position_pressure": "施加位置压力",
             "resolve_endgame": "收束残局",
