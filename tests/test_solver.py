@@ -383,3 +383,66 @@ def test_game_session_reaches_logical_solved_state():
     assert session.status == session.LOGICALLY_SOLVED
     assert session.logical_answer == "3457"
     assert session.to_dict()["candidate_count"] == 1
+
+
+def test_game_session_save_and_resume_preserves_case_state():
+    session = GameSession(mode="assist", solver=QuestLineSolver(use_cache=False))
+    session.apply_turn("0123", "0b1c")
+    snapshot = session.save()
+    resumed = GameSession.resume(snapshot, solver=QuestLineSolver(use_cache=False))
+    assert resumed.mode == "assist"
+    assert resumed.history == [("0123", (0, 1))]
+    assert resumed.story.to_dict()["event_count"] == 1
+    assert resumed.current_state()["candidate_count"] == 1440
+
+
+def test_game_session_replay_and_markdown_keep_rejected_attempts_separate():
+    session = GameSession(mode="assist", solver=QuestLineSolver(use_cache=False))
+    session.apply_turn("0123", "0b1c")
+    try:
+        session.apply_turn("1045", "4b0c")
+    except ValueError as exc:
+        assert "no possible answer" in str(exc)
+    else:
+        raise AssertionError("inconsistent feedback should be rejected")
+    assert session.history == [("0123", (0, 1))]
+    assert len(session.replay()["rejected"]) == 1
+    assert "被拒绝的输入" in session.export_markdown()
+
+
+def test_adventure_rejects_cheating_feedback_without_polluting_story():
+    session = GameSession(mode="adventure", answer="3457", solver=QuestLineSolver(use_cache=False))
+    try:
+        session.apply_turn("0123", "4b0c")
+    except ValueError as exc:
+        assert "hidden answer" in str(exc)
+    else:
+        raise AssertionError("dishonest adventure feedback should be rejected")
+    assert session.history == []
+    assert session.story.events == []
+    assert session.replay()["rejected"][0]["reason"] == "feedback does not match the hidden answer"
+
+
+def test_game_session_current_state_exposes_webui_read_model():
+    session = GameSession(mode="assist", solver=QuestLineSolver(use_cache=False))
+    session.apply_turn("0123", "0b1c")
+    state = session.current_state()
+    assert state["mode"] == "assist"
+    assert state["candidate_count"] == 1440
+    assert "digits" in state and "0" in state["digits"]
+    assert "groups" in state and "01" in state["groups"]
+    assert "group_relations" in state
+    assert "world_line" in state and "main_world" in state["world_line"]
+    assert state["chapters"]
+    assert state["suspense"]["level"] == "open"
+
+
+def test_game_session_replay_contains_last_chapter_and_markdown_metadata():
+    session = GameSession(mode="assist", solver=QuestLineSolver(use_cache=False))
+    session.apply_turn("0123", "0b1c", source="Manual")
+    replay = session.replay()
+    assert replay["accepted"][0]["source"] == "Manual"
+    assert replay["accepted"][0]["chapter"]["title"]
+    markdown = session.export_markdown()
+    assert "## 会话信息" in markdown
+    assert "已接受行动：1" in markdown
