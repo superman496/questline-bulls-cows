@@ -4,7 +4,39 @@
 >
 > Current stable milestone: **v1.3.0 – Narrative Engine Refactor**
 >
-> Next milestone: **v1.4.0 – Multi-mode GameSession and richer story orchestration**
+> Next milestone: **v1.4.0 – GameSession and Narrative Productization**
+
+## 0. Current Development Baseline
+
+The repository is currently at the completed **v1.3.0 Narrative Engine
+Refactor** baseline. The next conversation should continue from this state and
+follow the v1.4 plan in `CHANGELOG.md`.
+
+The conceptual explanation of the 1.3 engine and story pipeline lives in
+`ARCHITECTURE.md`. Read it before changing the investigation model or adding a
+new presentation adapter.
+
+### v1.4 development order
+
+1. Define the shared `GameSession` contract.
+2. Route Assist, Simulation, and Adventure through it.
+3. Upgrade `StoryBook` from event log to case narrative.
+4. Expose structured read APIs for future WebUI adapters.
+5. Add replay, save/resume, export, and fault scenarios.
+6. Keep CLI as the reference/debug client.
+
+The intended architecture is:
+
+```text
+QuestLine Core Engine
+        ↓
+GameSession / StoryBook
+        ↓
+CLI Adapter       WebUI Adapter (future)
+```
+
+WebUI must consume structured session and story data directly; it must not
+parse CLI text output.
 
 ---
 

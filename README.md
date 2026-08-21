@@ -134,6 +134,8 @@ patterns. This is observability only in v1.3; it does not retune recommendation
 scoring yet.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the complete 1.3 engine migration record.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the engine design and the path from
+structured transitions to the QuestLine story line.
 
 Interactive mode:
 

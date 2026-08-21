@@ -41,3 +41,37 @@ QuestLine 1.3 is an engine refactor, not a parameter-tuning release.
 - 22 engine and StoryBook regression tests pass.
 - 500-answer behavior benchmark: average `4.7580` steps, maximum `6`.
 - The benchmark is observability-only and does not retune recommendation scores.
+
+## 1.4.0 — GameSession and Narrative Productization (Planned)
+
+The 1.4 development line starts from the completed 1.3 engine refactor.
+
+### Primary objective
+
+- Introduce a shared `GameSession` state layer for Assist / 协查,
+  Simulation / 推演, and Adventure / 冒险.
+- Make `StoryBook` a complete case narrative rather than only a sequence of
+  transition logs.
+- Keep CLI as a reference client and debugging surface, not as the product
+  architecture.
+
+### Planned work
+
+- Define stable session state, action, feedback, transition, and status
+  contracts.
+- Route all three modes through the same session transition pipeline.
+- Add chapter state, character profiles, group relations, world-line history,
+  turning points, rejected hypotheses, current suspense, and case closure.
+- Expose structured read APIs for future WebUI clients: current state,
+  timeline, digits, groups, worlds, chapters, and next action.
+- Preserve the 1.3 engine decision logic while improving session orchestration
+  and presentation.
+- Add session save/resume, replay, Markdown export, and fault/cheating
+  feedback scenarios after the core contracts stabilize.
+
+### Design boundary
+
+- Do not make WebUI depend on CLI text output.
+- Do not reintroduce large score-tuning parameter layers.
+- CLI and future WebUI should be adapters over `QuestLine Core → GameSession →
+  StoryBook`.
