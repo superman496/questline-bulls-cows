@@ -30,12 +30,12 @@ import argparse
 import os
 import re
 import time
-from typing import DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 Digit = str
 Code = str
 Feedback = Tuple[int, int]
-History = Sequence[Tuple[Code, Feedback | str]]
+History = Sequence[Tuple[Code, Union[Feedback, str]]]
 
 DIGITS = "0123456789"
 CODE_LEN = 4
@@ -50,6 +50,7 @@ FIXED_GROUPS: Dict[str, set[str]] = {
     "67": set("67"),
     "89": set("89"),
 }
+GROUP_ORDER: Tuple[str, ...] = tuple(FIXED_GROUPS)
 
 FB_TO_BYTE: Dict[Feedback, int] = {(b, c): b * 5 + c for b in range(5) for c in range(5 - b)}
 BYTE_TO_FB: Dict[int, Feedback] = {v: k for k, v in FB_TO_BYTE.items()}
@@ -91,7 +92,7 @@ def fb_to_str(fb: Feedback) -> str:
     return f"{fb[0]}b{fb[1]}c"
 
 
-def parse_feedback(value: Feedback | str) -> Feedback:
+def parse_feedback(value: Union[Feedback, str]) -> Feedback:
     if isinstance(value, tuple):
         return value
     text = str(value).strip().lower()
@@ -109,6 +110,13 @@ def parse_feedback(value: Feedback | str) -> Feedback:
     raise ValueError(f"Cannot parse feedback: {value}")
 
 
+def validate_feedback(feedback: Feedback) -> Feedback:
+    bulls, cows = feedback
+    if bulls < 0 or cows < 0 or bulls > CODE_LEN or cows > CODE_LEN - bulls:
+        raise ValueError(f"Invalid feedback: {feedback}")
+    return feedback
+
+
 def validate_code(code: Code) -> Code:
     code = str(code).strip()
     if len(code) != CODE_LEN:
@@ -121,10 +129,10 @@ def validate_code(code: Code) -> Code:
 
 
 def normalize_history(history: History) -> List[Tuple[Code, Feedback]]:
-    return [(validate_code(guess), parse_feedback(fb)) for guess, fb in history]
+    return [(validate_code(guess), validate_feedback(parse_feedback(fb))) for guess, fb in history]
 
 
-class QuestLineSolver:
+class _QuestLineCore:
     """Narrative-driven Bulls & Cows solver.
 
     The first and second moves are served from a small opening book. The feedback
@@ -332,6 +340,251 @@ class QuestLineSolver:
         self._weights_cache[candidates] = result
         return result
 
+    def world_line_analysis(self, history: History) -> Dict[str, object]:
+        """Summarize the strongest fixed-group world and its supporting patterns."""
+        normalized = normalize_history(history)
+        candidates = self.filter_candidates(normalized)
+        if not candidates:
+            return {"candidate_count": 0, "main_world": None, "worlds": [], "top_pairs": [], "top_triples": [], "top_quads": [], "timeline": []}
+
+        stats = self.stats(candidates)
+        world_counts: Counter[Tuple[int, ...]] = Counter(self.fixed_signature(ALL_CODES[index]) for index in candidates)
+        ranked_worlds = sorted(world_counts.items(), key=lambda item: (-item[1], item[0]))
+        main_signature, main_count = ranked_worlds[0]
+        total = len(candidates)
+        tied_worlds = [signature for signature, count in ranked_worlds if count == main_count]
+
+        def ranked(counter: Counter[str], limit: int) -> List[Dict[str, object]]:
+            return [{"pattern": key, "count": count, "support": count / total} for key, count in counter.most_common(limit)]
+
+        worlds = [
+            {
+                "signature": list(signature),
+                "groups": [name for name, amount in zip(FIXED_GROUPS, signature) if amount],
+                "count": count,
+                "support": count / total,
+                "is_main": signature == main_signature,
+            }
+            for signature, count in sorted(world_counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+        timeline: List[Dict[str, object]] = []
+        for round_number in range(len(normalized) + 1):
+            prefix = normalized[:round_number]
+            prefix_candidates = self.filter_candidates(prefix)
+            if not prefix_candidates:
+                timeline.append({"round": round_number, "candidate_count": 0, "main_world": None, "support": 0.0})
+                continue
+            prefix_worlds = Counter(self.fixed_signature(ALL_CODES[index]) for index in prefix_candidates)
+            signature, count = sorted(prefix_worlds.items(), key=lambda item: (-item[1], item[0]))[0]
+            prefix_tied_count = sum(1 for world_count in prefix_worlds.values() if world_count == count)
+            timeline.append({
+                "round": round_number,
+                "candidate_count": len(prefix_candidates),
+                "main_world": list(signature),
+                "support": count / len(prefix_candidates),
+                "tied_world_count": prefix_tied_count,
+            })
+
+        previous_support = None
+        for item in timeline:
+            support = item["support"]
+            item["support_delta"] = None if previous_support is None else support - previous_support
+            previous_support = support
+
+        runner_up_count = ranked_worlds[1][1] if len(ranked_worlds) > 1 else 0
+        lead = (main_count - runner_up_count) / total
+        confidence = "tied" if len(tied_worlds) > 1 else ("weak" if lead < 0.05 else "clear")
+        main_world = {
+            "signature": list(main_signature),
+            "groups": [name for name, amount in zip(FIXED_GROUPS, main_signature) if amount],
+            "count": main_count,
+            "support": main_count / total,
+            "lead_over_runner_up": lead,
+            "runner_up_support": runner_up_count / total,
+            "confidence": confidence,
+            "tied_world_count": len(tied_worlds),
+        }
+
+        return {
+            "candidate_count": total,
+            "main_world": main_world,
+            "worlds": worlds,
+            "top_pairs": ranked(stats["pair"], 5),
+            "top_triples": ranked(stats["tri"], 5),
+            "top_quads": ranked(stats["quad"], 5),
+            "timeline": timeline,
+        }
+
+    @staticmethod
+    def _changed_digit_facts(before: Dict[str, object], after: Dict[str, object]) -> Dict[str, List[str]]:
+        changes = {"confirmed": [], "likely": [], "excluded": [], "weakened": [], "strengthened": []}
+        before_status = before.get("digit_status", {})
+        after_status = after.get("digit_status", {})
+        rank = {"excluded": 0, "possible": 1, "likely": 2, "confirmed": 3}
+        for digit in DIGITS:
+            old = before_status.get(digit, {}).get("status", "possible")
+            new = after_status.get(digit, {}).get("status", "possible")
+            if old == new:
+                continue
+            if new == "confirmed":
+                changes["confirmed"].append(digit)
+            elif new == "likely":
+                changes["likely"].append(digit)
+            elif new == "excluded":
+                changes["excluded"].append(digit)
+            if rank.get(new, 1) > rank.get(old, 1):
+                changes["strengthened"].append(digit)
+            else:
+                changes["weakened"].append(digit)
+        return changes
+
+    @staticmethod
+    def _changed_position_facts(before: Dict[str, object], after: Dict[str, object]) -> Dict[str, List[Dict[str, object]]]:
+        changes = {"strengthened": [], "weakened": [], "confirmed": [], "excluded": []}
+        before_support = before.get("digit_position_support", {})
+        after_support = after.get("digit_position_support", {})
+        before_status = before.get("digit_status", {})
+        after_status = after.get("digit_status", {})
+        for digit in DIGITS:
+            old_values = before_support.get(digit, [0.0] * CODE_LEN)
+            new_values = after_support.get(digit, [0.0] * CODE_LEN)
+            for position, (old, new) in enumerate(zip(old_values, new_values)):
+                delta = new - old
+                old_status = before_status.get(digit, {}).get("position_status", ["possible"] * CODE_LEN)[position]
+                new_status = after_status.get(digit, {}).get("position_status", ["possible"] * CODE_LEN)[position]
+                item = {
+                    "digit": digit,
+                    "position": position,
+                    "old_support": old,
+                    "new_support": new,
+                    "support_delta": delta,
+                }
+                if new_status == "confirmed" and old_status != "confirmed":
+                    changes["confirmed"].append(item)
+                elif new_status == "excluded" and old_status != "excluded":
+                    changes["excluded"].append(item)
+                elif delta >= 0.10:
+                    changes["strengthened"].append(item)
+                elif delta <= -0.10:
+                    changes["weakened"].append(item)
+        return changes
+
+    def explain_transition(self, history: History, guess: Code, feedback: Union[Feedback, str]) -> Dict[str, object]:
+        """Explain one action as a transition from one investigation state to another."""
+        normalized = normalize_history(history)
+        guess = validate_code(guess)
+        feedback = validate_feedback(parse_feedback(feedback))
+        before = self.investigation_state(normalized)
+        action = self.classify_action(guess, normalized, before, CODE_TO_INDEX[guess] in set(self.filter_candidates(normalized)))
+        rationale = self.action_rationale(action, before)
+        after_history = normalized + [(guess, feedback)]
+        after = self.investigation_state(after_history)
+        before_world = self.world_line_analysis(normalized)
+        after_world = self.world_line_analysis(after_history)
+        digit_changes = self._changed_digit_facts(before, after)
+        position_changes = self._changed_position_facts(before, after)
+        group_changes = []
+        for group in GROUP_ORDER:
+            old = before.get("group_states", {}).get(group, {}).get("status")
+            new = after.get("group_states", {}).get(group, {}).get("status")
+            if old != new:
+                group_changes.append({"group": group, "before": old, "after": new})
+        old_task = before.get("task")
+        new_task = after.get("task")
+        old_main = (before_world.get("main_world") or {}).get("groups", [])
+        new_main = (after_world.get("main_world") or {}).get("groups", [])
+        if feedback == (CODE_LEN, 0):
+            event_type = "solution_revealed"
+            title = "答案被直接确认"
+        elif after.get("candidate_count", 0) == 0:
+            event_type = "state_inconsistent"
+            title = "这条反馈与现有证据冲突"
+        elif digit_changes["confirmed"] or digit_changes["excluded"]:
+            event_type = "identity_breakthrough"
+            title = "数字身份发生突破"
+        elif any(position_changes.values()):
+            event_type = "position_breakthrough"
+            title = "数字位置发生变化"
+        elif old_task != new_task:
+            event_type = "investigation_shifted"
+            title = "调查任务发生转移"
+        elif old_main != new_main:
+            event_type = "worldline_shifted"
+            title = "主世界线发生变化"
+        elif after.get("candidate_count", 0) < before.get("candidate_count", 0) * 0.25:
+            event_type = "candidate_space_collapsed"
+            title = "可能性空间明显收束"
+        else:
+            event_type = "evidence_updated"
+            title = "证据继续累积"
+        return {
+            "round": len(after_history),
+            "type": event_type,
+            "title": title,
+            "action": {"guess": guess, "feedback": fb_to_str(feedback), "classification": action},
+            "decision": {"task": old_task, "rationale": rationale},
+            "before": {"candidate_count": before.get("candidate_count"), "task": old_task, "main_world": old_main},
+            "after": {"candidate_count": after.get("candidate_count"), "task": new_task, "main_world": new_main},
+            "facts": digit_changes,
+            "position_facts": position_changes,
+            "group_changes": group_changes,
+            "worldline": {
+                "before_support": (before_world.get("main_world") or {}).get("support", 0.0),
+                "after_support": (after_world.get("main_world") or {}).get("support", 0.0),
+                "before_confidence": (before_world.get("main_world") or {}).get("confidence"),
+                "after_confidence": (after_world.get("main_world") or {}).get("confidence"),
+            },
+            "narrative": self._transition_narrative(
+                title, guess, action, feedback, before, after, digit_changes, position_changes, old_task, new_task, rationale
+            ),
+        }
+
+    @staticmethod
+    def action_rationale(action: Dict[str, object], state: Dict[str, object]) -> str:
+        """Explain why an action answers the current investigation task."""
+        task = state.get("task")
+        groups = ", ".join(action.get("new_groups", [])) or "已调查组"
+        if task == "establish_foundation":
+            return "先建立基础数字关系，给后续组间比较提供共同参照。"
+        if task == "introduce_45":
+            return "01 与 23 已有第一层证据，现在引入 45，观察好人主干是否延伸。"
+        if task in {"investigate_outer_groups", "cross_test_new_group"}:
+            return f"当前重点是引入未调查信息，行动选择测试 {groups}，同时保持基本 AVG/MM 效率。"
+        if task == "converge_outer_choice":
+            return "外围仍有对称解释，选择一个外围分支施加压力，而不是假定某个数字已经领先。"
+        if task == "resolve_group_conflict":
+            conflicts = ", ".join(state.get("strong_conflict_groups", [])) or "组内关系"
+            return f"当前需要拆解 {conflicts} 的组内关系，优先获取身份或位置上的分裂证据。"
+        if task == "apply_position_pressure":
+            digits = "".join(state.get("position_uncertainty", [])) or "已知数字"
+            return f"身份线索已经足够，下一步针对 {digits} 的位置关系施加压力。"
+        if task == "resolve_endgame":
+            return "剩余世界很少，优先直接验证候选答案，避免继续制造无意义的外围猜测。"
+        return f"行动类型为 {action.get('type', 'unknown')}，用于推进当前调查。"
+
+    @staticmethod
+    def _transition_narrative(title: str, guess: Code, action: Dict[str, object], feedback: Feedback, before: Dict[str, object], after: Dict[str, object], changes: Dict[str, List[str]], position_changes: Dict[str, List[Dict[str, object]]], old_task: str, new_task: str, rationale: str) -> str:
+        parts = [f"{title}：因为{rationale}行动 {guess}，得到 {fb_to_str(feedback)}。"]
+        if changes["confirmed"]:
+            parts.append(f"数字 {''.join(changes['confirmed'])} 在剩余世界中已基本确认。")
+        if changes["excluded"]:
+            parts.append(f"数字 {''.join(changes['excluded'])} 被当前证据排除。")
+        if changes["weakened"]:
+            parts.append(f"数字 {''.join(changes['weakened'])} 的支持度下降。")
+        strengthened_positions = position_changes["strengthened"] + position_changes["confirmed"]
+        weakened_positions = position_changes["weakened"] + position_changes["excluded"]
+        if strengthened_positions:
+            details = "、".join(f"{item['digit']}→第{item['position'] + 1}位" for item in strengthened_positions[:3])
+            parts.append(f"位置证据增强：{details}。")
+        if weakened_positions:
+            details = "、".join(f"{item['digit']}×第{item['position'] + 1}位" for item in weakened_positions[:3])
+            parts.append(f"位置解释被削弱：{details}。")
+        if after.get("candidate_count") != before.get("candidate_count"):
+            parts.append(f"结果空间从 {before.get('candidate_count')} 缩小到 {after.get('candidate_count')}。")
+        if old_task != new_task:
+            parts.append(f"调查从 {old_task} 转向 {new_task}。")
+        return "".join(parts)
+
     def _candidate_base_weight(self, code: Code, stats: Dict[str, object]) -> float:
         n = stats["n"]
         dc: Counter[str] = stats["dc"]
@@ -366,6 +619,99 @@ class QuestLineSolver:
         penalty *= 0.80 + 0.40 * (quad["".join(sorted_code)] / n)
         return digit_score * position_score * pair_score * triple_score * quad_score * penalty
 
+
+class _QuestLineReasoningLayer(_QuestLineCore):
+    """Organize transition explanations into a continuous investigation story."""
+
+    CHAPTERS: Dict[str, Tuple[str, str]] = {
+        "establish_foundation": ("prologue", "案件建立"),
+        "introduce_45": ("foundation", "核心事实"),
+        "investigate_outer_groups": ("new_witnesses", "新的证人"),
+        "cross_test_new_group": ("outer_split", "外围分裂"),
+        "converge_outer_choice": ("outer_split", "外围分裂"),
+        "resolve_group_conflict": ("group_conflict", "阵营冲突"),
+        "apply_position_pressure": ("position_evidence", "位置证据"),
+        "resolve_endgame": ("convergence", "收束"),
+    }
+
+    def __init__(self, solver: Optional[QuestLineSolver] = None) -> None:
+        self.solver = solver or QuestLineSolver()
+        self.events: List[Dict[str, object]] = []
+        self.chapters: List[Dict[str, object]] = []
+        self.digit_index: DefaultDict[str, List[int]] = defaultdict(list)
+        self.group_index: DefaultDict[str, List[int]] = defaultdict(list)
+
+    @classmethod
+    def from_history(cls, history: History, solver: Optional[QuestLineSolver] = None) -> "StoryBook":
+        book = cls(solver)
+        normalized = normalize_history(history)
+        prefix: List[Tuple[Code, Feedback]] = []
+        for guess, feedback in normalized:
+            book.add_turn(prefix, guess, feedback)
+            prefix.append((guess, feedback))
+        return book
+
+    def add_turn(self, history: History, guess: Code, feedback: Union[Feedback, str]) -> Dict[str, object]:
+        event = dict(self.solver.explain_transition(history, guess, feedback))
+        chapter_key, chapter_title = self._chapter_for(event)
+        event["chapter"] = {"key": chapter_key, "title": chapter_title}
+        event_index = len(self.events)
+        self.events.append(event)
+        self._index_event(event_index, event)
+        if not self.chapters or self.chapters[-1]["key"] != chapter_key:
+            self.chapters.append({
+                "key": chapter_key,
+                "title": chapter_title,
+                "start_round": event["round"],
+                "end_round": event["round"],
+                "event_indexes": [event_index],
+                "narratives": [event["narrative"]],
+            })
+        else:
+            chapter = self.chapters[-1]
+            chapter["end_round"] = event["round"]
+            chapter["event_indexes"].append(event_index)
+            chapter["narratives"].append(event["narrative"])
+        return event
+
+    def _chapter_for(self, event: Dict[str, object]) -> Tuple[str, str]:
+        if event["type"] == "solution_revealed":
+            return "resolution", "终章：破案"
+        task = event["after"].get("task")
+        if task in self.CHAPTERS:
+            key, title = self.CHAPTERS[task]
+            return key, title
+        return "investigation", "调查展开"
+
+    def _index_event(self, event_index: int, event: Dict[str, object]) -> None:
+        facts = event.get("facts", {})
+        for category in ("confirmed", "likely", "excluded", "weakened", "strengthened"):
+            for digit in facts.get(category, []):
+                if event_index not in self.digit_index[digit]:
+                    self.digit_index[digit].append(event_index)
+        for category in ("strengthened", "weakened", "confirmed", "excluded"):
+            for item in event.get("position_facts", {}).get(category, []):
+                digit = item.get("digit")
+                if digit and event_index not in self.digit_index[digit]:
+                    self.digit_index[digit].append(event_index)
+        for change in event.get("group_changes", []):
+            group = change.get("group")
+            if group and event_index not in self.group_index[group]:
+                self.group_index[group].append(event_index)
+
+    def chapter(self, key: str) -> Optional[Dict[str, object]]:
+        return next((item for item in self.chapters if item["key"] == key), None)
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "event_count": len(self.events),
+            "chapter_count": len(self.chapters),
+            "chapters": self.chapters,
+            "events": self.events,
+            "digit_index": dict(self.digit_index),
+            "group_index": dict(self.group_index),
+        }
+
     def weighted_stats(self, candidates: Tuple[int, ...], guess_index: int, weights: Dict[int, float]) -> Tuple[float, float, int]:
         self.ensure_matrix()
         assert self.feedback_matrix is not None
@@ -386,84 +732,423 @@ class QuestLineSolver:
     # Signal modes and strategy scoring
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def total_bulls(history: List[Tuple[Code, Feedback]]) -> int:
-        return sum(fb[0] for _, fb in history)
+    def classify_action(self, guess: Code, history: History, investigation: Dict[str, object], is_candidate: bool) -> Dict[str, object]:
+        """Describe what a guess is investigating, independent of its score."""
+        normalized = normalize_history(history)
+        if any(previous_guess == guess for previous_guess, _ in normalized):
+            return {
+                "type": "redundant",
+                "reason": "repeats an already tested guess without adding information",
+                "groups": [group for group in GROUP_ORDER if any(digit in FIXED_GROUPS[group] for digit in guess)],
+                "new_groups": [],
+                "new_group_digit_counts": {},
+                "new_positions": [],
+            }
+        tested_groups = set(investigation.get("tested_groups", []))
+        guess_groups = [group for group in GROUP_ORDER if any(digit in FIXED_GROUPS[group] for digit in guess)]
+        new_groups = [group for group in guess_groups if group not in tested_groups]
+        new_group_digit_counts = {
+            group: sum(digit in FIXED_GROUPS[group] for digit in guess)
+            for group in new_groups
+        }
+        used = self.used_positions(normalized)
+        new_positions = [position for position, digit in enumerate(guess) if position not in used.get(digit, set())]
+
+        if is_candidate and investigation.get("task") == "resolve_endgame":
+            action_type = "candidate_probe"
+            reason = "tests a remaining candidate directly"
+        elif new_groups:
+            action_type = "group_probe"
+            reason = "introduces untested groups"
+        elif new_positions:
+            action_type = "position_probe"
+            reason = "reuses tested digits in new positions"
+        elif is_candidate:
+            action_type = "candidate_probe"
+            reason = "tests a remaining candidate"
+        else:
+            action_type = "mechanical_split"
+            reason = "primarily separates feedback buckets"
+
+        return {
+            "type": action_type,
+            "reason": reason,
+            "groups": guess_groups,
+            "new_groups": new_groups,
+            "new_group_digit_counts": new_group_digit_counts,
+            "new_positions": new_positions,
+        }
 
     @staticmethod
-    def last_fb(history: List[Tuple[Code, Feedback]]) -> Feedback:
-        return history[-1][1] if history else (0, 0)
+    def action_is_eligible(action: Dict[str, object], task: str) -> bool:
+        """Apply structural investigation rules before numerical ranking."""
+        action_type = action.get("type")
+        if action_type == "redundant":
+            return False
+        if task == "cross_test_new_group":
+            if action_type != "group_probe":
+                return False
+            new_groups = action.get("new_groups", [])
+            counts = action.get("new_group_digit_counts", {})
+            if len(new_groups) != 1:
+                return False
+            new_group = new_groups[0]
+            return counts.get(new_group) == 2
+        if task == "converge_outer_choice":
+            if action_type != "group_probe":
+                return False
+            new_groups = action.get("new_groups", [])
+            counts = action.get("new_group_digit_counts", {})
+            if len(new_groups) != 1:
+                return False
+            return counts.get(new_groups[0], 0) in {1, 2}
+        return True
 
-    @staticmethod
-    def is_low_signal(fb: Feedback) -> bool:
-        return fb[0] == 0 and (fb[0] + fb[1]) <= 2
 
-    def low_signal_intensity(self, history: List[Tuple[Code, Feedback]]) -> int:
-        if len(history) < 3 or not all(self.is_low_signal(fb) for _, fb in history[-3:]):
-            return 0
-        return 2 if all(fb == (0, 1) for _, fb in history[-3:]) else 1
+class StoryBook(_QuestLineReasoningLayer):
+    """Public story organizer built on the solver's explanation layer."""
 
-    def no_bull_intensity(self, history: List[Tuple[Code, Feedback]]) -> int:
-        if len(history) < 3:
-            return 0
-        recent = [fb for _, fb in history[-3:]]
-        bull_sum = sum(fb[0] for fb in recent)
-        hit_sum = sum(fb[0] + fb[1] for fb in recent)
-        if bull_sum == 0 and hit_sum <= 7:
-            return 2 if all(fb[1] <= 2 for fb in recent) else 1
-        if len(history) >= 4:
-            recent4 = [fb for _, fb in history[-4:]]
-            if sum(fb[0] for fb in recent4) <= 1 and sum(fb[0] + fb[1] for fb in recent4) <= 9:
-                return 1
-        return 0
+    def render(self, include_indexes: bool = False) -> str:
+        """Render the investigation as a readable Chinese case book."""
+        if not self.events:
+            return "《QuestLine 案件记录》\n\n案件尚未开始。"
 
-    def fallback_mode(self, history: List[Tuple[Code, Feedback]]) -> int:
-        return max(self.low_signal_intensity(history), self.no_bull_intensity(history))
+        lines = ["《QuestLine 案件记录》", "", f"共 {len(self.events)} 轮，形成 {len(self.chapters)} 个章节。"]
+        for chapter in self.chapters:
+            lines.extend(["", f"## {chapter['title']}"])
+            for event_index in chapter["event_indexes"]:
+                lines.append(self.events[event_index]["narrative"])
+
+        final = self.events[-1]
+        if final["type"] == "solution_revealed":
+            lines.extend(["", "案件结论：反馈已经确认答案，调查结束。"])
+        elif final["after"].get("candidate_count") == 0:
+            lines.extend(["", "案件状态：反馈与现有证据冲突，需要检查输入或重新审理。"])
+        else:
+            lines.extend(["", f"案件状态：仍有 {final['after'].get('candidate_count')} 个可能世界，调查尚未结束。"])
+
+        if include_indexes:
+            lines.extend(["", "## 角色索引", self.render_digit_index()])
+            lines.extend(["", "## 阵营索引", self.render_group_index()])
+        return "\n".join(lines)
+
+    def render_digit_index(self) -> str:
+        """Render the rounds in which each digit's evidence changed."""
+        rows = []
+        for digit in DIGITS:
+            rounds = self.digit_index.get(digit, [])
+            if rounds:
+                rows.append(f"数字 {digit}：第 {', '.join(str(index + 1) for index in rounds)} 轮出现关键变化")
+        return "\n".join(rows) if rows else "暂时没有数字获得新的证据。"
+
+    def render_group_index(self) -> str:
+        """Render the groups whose internal relation changed."""
+        rows = []
+        for group in GROUP_ORDER:
+            rounds = self.group_index.get(group, [])
+            if rounds:
+                rows.append(f"小组 {group}：第 {', '.join(str(index + 1) for index in rounds)} 轮关系发生变化")
+        return "\n".join(rows) if rows else "暂时没有小组关系发生结构性变化。"
+
+
+class QuestLineSolver(_QuestLineReasoningLayer):
+    """Complete solver assembled from the core and investigation layers."""
+
+    def __init__(self, use_cache: bool = True, verbose: bool = False) -> None:
+        _QuestLineCore.__init__(self, use_cache=use_cache, verbose=verbose)
+
+    def investigation_state(self, history: History) -> Dict[str, object]:
+        """Build the factual investigation state without applying score weights.
+
+        This is the first layer of the refactored engine. It describes what has
+        been tested and what the remaining candidate set says about each group;
+        it does not decide which candidate is more narratively likely.
+        """
+        normalized = normalize_history(history)
+        candidates = self.filter_candidates(normalized)
+        candidate_count = len(candidates)
+        tested_groups = [
+            group for group in GROUP_ORDER
+            if any(any(digit in FIXED_GROUPS[group] for digit in guess) for guess, _ in normalized)
+        ]
+        untested_groups = [group for group in GROUP_ORDER if group not in tested_groups]
+
+        group_states: Dict[str, Dict[str, object]] = {}
+        for group in GROUP_ORDER:
+            occupancy = Counter(
+                sum(digit in FIXED_GROUPS[group] for digit in ALL_CODES[index])
+                for index in candidates
+            )
+            zero_count = occupancy.get(0, 0)
+            two_count = occupancy.get(2, 0)
+            if not normalized:
+                status = "unobserved"
+            elif candidate_count == 0:
+                status = "inconsistent"
+            elif zero_count == candidate_count:
+                status = "excluded"
+            elif two_count == candidate_count:
+                status = "full"
+            elif group not in tested_groups:
+                status = "unobserved"
+            elif zero_count == 0:
+                status = "present"
+            else:
+                status = "contested"
+            group_states[group] = {
+                "status": status,
+                "tested": group in tested_groups,
+                "occupancy_counts": {str(amount): occupancy.get(amount, 0) for amount in range(3)},
+                "possible_candidate_support": (candidate_count - zero_count) / candidate_count if candidate_count else 0.0,
+                "full_candidate_support": two_count / candidate_count if candidate_count else 0.0,
+            }
+
+        digit_support = {
+            digit: sum(digit in ALL_CODES[index] for index in candidates) / candidate_count
+            if candidate_count else 0.0
+            for digit in DIGITS
+        }
+        digit_position_support = {
+            digit: [
+                sum(ALL_CODES[index][position] == digit for index in candidates) / candidate_count
+                if candidate_count else 0.0
+                for position in range(CODE_LEN)
+            ]
+            for digit in DIGITS
+        }
+
+        def support_status(support: float) -> str:
+            if support <= 0.02:
+                return "excluded"
+            if support >= 0.98:
+                return "confirmed"
+            if support >= 0.75:
+                return "likely"
+            return "possible"
+
+        digit_status = {}
+        for digit, support in digit_support.items():
+            positions = digit_position_support[digit]
+            digit_status[digit] = {
+                "support": support,
+                "status": support_status(support),
+                "position_support": positions,
+                "position_status": [support_status(value) for value in positions],
+                "most_likely_position": max(range(CODE_LEN), key=lambda position: positions[position]),
+            }
+
+        group_relations: Dict[str, Dict[str, object]] = {}
+        for group in GROUP_ORDER:
+            group_digits = sorted(FIXED_GROUPS[group])
+            first, second = group_digits
+            first_support = digit_support[first]
+            second_support = digit_support[second]
+            support_gap = abs(first_support - second_support)
+            position_gap = max(
+                abs(left - right)
+                for left, right in zip(
+                    digit_position_support[first], digit_position_support[second]
+                )
+            )
+            both_supported = first_support > 0.25 and second_support > 0.25
+            both_excluded = first_support <= 0.02 and second_support <= 0.02
+            one_strong_one_weak = (
+                max(first_support, second_support) >= 0.75
+                and min(first_support, second_support) <= 0.25
+            )
+            if both_excluded:
+                relation = "both_excluded"
+            elif one_strong_one_weak:
+                relation = "one_strong_one_weak"
+            elif both_supported and support_gap <= 0.03:
+                relation = "symmetric"
+            elif both_supported and position_gap >= 0.35:
+                relation = "position_conflict"
+            elif both_supported:
+                relation = "both_supported"
+            else:
+                relation = "unresolved"
+            group_relations[group] = {
+                "digits": group_digits,
+                "relation": relation,
+                "support": {first: first_support, second: second_support},
+                "support_gap": support_gap,
+                "position_gap": position_gap,
+                "both_supported": both_supported,
+                "both_excluded": both_excluded,
+            }
+        confirmed_digits = [digit for digit in DIGITS if digit_status[digit]["status"] == "confirmed"]
+        likely_digits = [digit for digit in DIGITS if digit_status[digit]["status"] == "likely"]
+        excluded_digits = [digit for digit in DIGITS if digit_status[digit]["status"] == "excluded"]
+        weak_tested_groups = [
+            group for group in tested_groups
+            if group_states[group]["possible_candidate_support"] <= 0.15
+        ]
+        outer_supports = [digit_support[digit] for digit in "6789"]
+        outer_is_symmetric = bool(outer_supports) and max(outer_supports) - min(outer_supports) <= 0.03
+        strong_conflict_groups = [
+            group for group, relation in group_relations.items()
+            if relation["relation"] in {"one_strong_one_weak", "position_conflict"}
+        ]
+        position_uncertainty = [
+            digit for digit in DIGITS
+            if digit_status[digit]["status"] in {"confirmed", "likely"}
+            and max(digit_position_support[digit]) < 0.98
+        ]
+
+        if not normalized:
+            task = "establish_foundation"
+        elif set(tested_groups) == {"01", "23"} and "45" not in tested_groups:
+            task = "introduce_45"
+        elif candidate_count <= 12:
+            task = "resolve_endgame"
+        elif strong_conflict_groups and not untested_groups:
+            task = "resolve_group_conflict"
+        elif position_uncertainty and not untested_groups:
+            task = "apply_position_pressure"
+        elif candidate_count <= 150 and (len(confirmed_digits) >= 3 or (weak_tested_groups and outer_is_symmetric)):
+            task = "converge_outer_choice"
+        elif len(untested_groups) >= 1:
+            task = "cross_test_new_group" if len(tested_groups) >= 2 else "investigate_outer_groups"
+        elif any(state["status"] == "contested" for state in group_states.values()):
+            task = "resolve_group_conflict"
+        else:
+            task = "apply_position_pressure"
+
+        available_actions = ["group_probe", "position_probe", "candidate_probe", "mechanical_split"]
+        if task in {"establish_foundation", "introduce_45", "cross_test_new_group", "investigate_outer_groups", "converge_outer_choice"}:
+            preferred_actions = ["group_probe", "position_probe"]
+        elif task == "resolve_endgame":
+            preferred_actions = ["candidate_probe", "mechanical_split"]
+        elif task == "resolve_group_conflict":
+            preferred_actions = ["group_probe", "position_probe", "mechanical_split"]
+        else:
+            preferred_actions = ["position_probe", "group_probe", "mechanical_split"]
+
+        return {
+            "round": len(normalized),
+            "candidate_count": candidate_count,
+            "tested_groups": tested_groups,
+            "untested_groups": untested_groups,
+            "group_states": group_states,
+            "digit_support": digit_support,
+            "digit_position_support": digit_position_support,
+            "digit_status": digit_status,
+            "confirmed_digits": confirmed_digits,
+            "likely_digits": likely_digits,
+            "excluded_digits": excluded_digits,
+            "weak_tested_groups": weak_tested_groups,
+            "group_relations": group_relations,
+            "strong_conflict_groups": strong_conflict_groups,
+            "position_uncertainty": position_uncertainty,
+            "outer_is_symmetric": outer_is_symmetric,
+            "task": task,
+            "available_actions": available_actions,
+            "preferred_actions": preferred_actions,
+            "task_status": "ready",
+            "task_policy": self.task_policy(task, candidate_count),
+        }
 
     def game_phase(self, history: List[Tuple[Code, Feedback]], candidates: Tuple[int, ...]) -> str:
         if not history:
             return "opening_first"
         if len(history) == 1 and history[0][0] == OPENING_FIRST:
             return "opening_second"
-        if len(history) == 2:
-            return "third"
         if len(candidates) <= 12:
             return "endgame"
         return "case"
 
-    def guard(self, phase: str, n: int, history: List[Tuple[Code, Feedback]]) -> Tuple[float, float, float, float]:
-        mode = self.fallback_mode(history)
-        if mode == 2:
-            return 1.06, 2.0, 1.14, 3
-        if mode == 1:
-            return 1.10, 2.0, 1.20, 3
-        if phase == "third":
-            return 1.18, 3.0, 1.30, 5
-        if phase == "case":
-            if n > 25:
-                return 1.13, 2.5, 1.24, 4
-            if n > 12:
-                return 1.24, 2.0, 1.34, 4
-            return 1.55, 2.0, 1.75, 3
-        if phase == "endgame":
-            return 1.70, 2.0, 1.90, 4
-        return 1.20, 2.0, 1.35, 4
+    @staticmethod
+    def task_policy(task: str, candidate_count: int) -> Dict[str, object]:
+        """Describe the current task's objective and efficiency contract."""
+        policies = {
+            "establish_foundation": ("weighted_expected", 1.20, 2.0, 1.35, 4),
+            "introduce_45": ("weighted_expected", 1.20, 2.0, 1.35, 4),
+            "investigate_outer_groups": ("weighted_expected", 1.35, 2.5, 1.50, 5),
+            "cross_test_new_group": ("weighted_expected", 1.35, 2.5, 1.50, 5),
+            "converge_outer_choice": ("main_world_expected", 1.55, 3.0, 1.75, 6),
+            "resolve_group_conflict": ("main_world_expected", 1.45, 3.0, 1.65, 6),
+            "apply_position_pressure": ("normal_expected", 1.30, 2.5, 1.50, 5),
+            "resolve_endgame": ("normal_max_bucket", 1.80, 3.0, 2.00, 6),
+        }
+        objective, exp_ratio, exp_slack, max_ratio, max_slack = policies.get(
+            task, ("normal_expected", 1.35, 2.5, 1.55, 5)
+        )
+        return {
+            "task": task,
+            "objective": objective,
+            "expected_ratio": exp_ratio,
+            "expected_slack": exp_slack,
+            "max_ratio": max_ratio,
+            "max_slack": max_slack,
+            "candidate_count": candidate_count,
+        }
 
-    def phase_weights(self, phase: str, n: int, history: List[Tuple[Code, Feedback]]) -> Dict[str, float]:
-        bull_boost = 0.10 * min(self.total_bulls(history), 4) + 0.08 * min(self.last_fb(history)[0], 3)
-        mode = self.fallback_mode(history)
-        if mode:
-            extra = 0.08 if mode == 2 else 0.0
-            return dict(w_exp=0.56+extra, normal_exp=0.24+extra, main_exp=0.16, max_weight=0.28+extra, digit=-0.45, pair=-0.42, triple=-0.18, quad=-0.08, fixed_group=-0.22, rotation=-0.25, bull=-0.92-bull_boost, weak_penalty=0.12, direct_prob=-0.90, candidate_bonus=-0.05, non_candidate_penalty=0.02, trigger_bonus=-0.12)
-        if phase == "third":
-            return dict(w_exp=0.44, normal_exp=0.16, main_exp=0.34, max_weight=0.20, digit=-1.10, pair=-1.05, triple=-0.50, quad=-0.25, fixed_group=-0.48, rotation=-0.40, bull=-0.72-bull_boost, weak_penalty=0.95, direct_prob=-2.00, candidate_bonus=-0.15, non_candidate_penalty=0.00, trigger_bonus=-1.00)
-        if phase == "case":
-            if n > 25:
-                return dict(w_exp=0.36, normal_exp=0.14, main_exp=0.34, max_weight=0.18, digit=-1.20, pair=-1.35, triple=-1.10, quad=-1.25, fixed_group=-0.55, rotation=-0.40, bull=-0.95-bull_boost, weak_penalty=1.10, direct_prob=-4.00, candidate_bonus=-0.70, non_candidate_penalty=0.35, trigger_bonus=-1.10)
-            return dict(w_exp=0.24, normal_exp=0.08, main_exp=0.28, max_weight=0.10, digit=-1.45, pair=-1.75, triple=-1.75, quad=-2.85, fixed_group=-0.65, rotation=-0.42, bull=-1.15-bull_boost, weak_penalty=1.35, direct_prob=-7.50, candidate_bonus=-1.80, non_candidate_penalty=0.90, trigger_bonus=-1.20)
-        if phase == "endgame":
-            return dict(w_exp=0.10, normal_exp=0.03, main_exp=0.14, max_weight=0.04, digit=-1.10, pair=-1.45, triple=-1.70, quad=-3.40, fixed_group=-0.25, rotation=-0.20, bull=-1.30-bull_boost, weak_penalty=1.00, direct_prob=-14.0, candidate_bonus=-3.50, non_candidate_penalty=3.50, trigger_bonus=-0.80)
-        return {}
+    @staticmethod
+    def task_transition(task: str) -> Optional[str]:
+        transitions = {
+            "establish_foundation": "investigate_outer_groups",
+            "introduce_45": "investigate_outer_groups",
+            "investigate_outer_groups": "apply_position_pressure",
+            "cross_test_new_group": "apply_position_pressure",
+            "converge_outer_choice": "resolve_group_conflict",
+            "resolve_group_conflict": "apply_position_pressure",
+            "apply_position_pressure": "resolve_endgame",
+            "resolve_endgame": None,
+        }
+        return transitions.get(task)
+
+    @staticmethod
+    def task_sort_key(item: Dict[str, object], investigation: Dict[str, object]) -> Tuple[object, ...]:
+        """Rank eligible actions by the current investigation objective.
+
+        The legacy score is deliberately absent from this key. AVG/MM limits
+        are applied before sorting; the task objectives and deterministic code
+        order decide the result from this point onward.
+        """
+        task = investigation.get("task")
+        action = item["action"]
+        action_type = action["type"]
+        preferred = investigation.get("preferred_actions", [])
+        action_rank = preferred.index(action_type) if action_type in preferred else len(preferred)
+
+        if task in {"establish_foundation", "introduce_45", "cross_test_new_group", "investigate_outer_groups"}:
+            objective = (
+                item["weighted_expected"],
+                item["main_world_expected"],
+                item["normal_expected"],
+                item["normal_max_bucket"],
+            )
+        elif task == "converge_outer_choice":
+            objective = (
+                item["main_world_expected"],
+                item["weighted_expected"],
+                item["normal_expected"],
+                item["normal_max_bucket"],
+            )
+        elif task == "resolve_group_conflict":
+            objective = (
+                item["main_world_expected"],
+                item["normal_max_bucket"],
+                item["normal_expected"],
+                item["weighted_expected"],
+            )
+        elif task == "apply_position_pressure":
+            objective = (
+                item["normal_expected"],
+                item["normal_max_bucket"],
+                item["weighted_expected"],
+                item["main_world_expected"],
+            )
+        else:
+            objective = (
+                -int(item["is_candidate"]),
+                item["normal_max_bucket"],
+                item["normal_expected"],
+                item["weighted_expected"],
+                item["main_world_expected"],
+            )
+        return (action_rank,) + objective + (item["guess"],)
 
     @staticmethod
     def used_positions(history: List[Tuple[Code, Feedback]]) -> Dict[str, set[int]]:
@@ -473,69 +1158,31 @@ class QuestLineSolver:
                 used[ch].add(pos)
         return used
 
-    def score_guess_features(self, guess: Code, stats: Dict[str, object], history: List[Tuple[Code, Feedback]], used: Dict[str, set[int]]) -> Dict[str, float]:
-        n = stats["n"]
-        dc: Counter[str] = stats["dc"]
-        pc: List[Counter[str]] = stats["pc"]
-        pair: Counter[str] = stats["pair"]
-        tri: Counter[str] = stats["tri"]
-        quad: Counter[str] = stats["quad"]
-        freqs: Dict[str, float] = stats["freqs"]
-        sorted_guess = sorted(guess)
-        return {
-            "digit": sum(dc[ch] / n for ch in guess) / 4.0,
-            "pair": sum(pair["".join(co)] / n for co in combinations(sorted_guess, 2)) / 6.0,
-            "triple": sum(tri["".join(co)] / n for co in combinations(sorted_guess, 3)) / 4.0,
-            "quad": quad["".join(sorted_guess)] / n,
-            "fixed_group": sum(stats["group_strength"][name] * min(sum(ch in group for ch in guess), 2) / 2 for name, group in FIXED_GROUPS.items()) / len(FIXED_GROUPS),
-            "rotation": sum(1.0 if pos not in used[ch] else -0.35 for pos, ch in enumerate(guess)) / 4.0 if history else 0.0,
-            "bull": sum(pc[pos][ch] / n for pos, ch in enumerate(guess)) / 4.0,
-            "weak": sum(1.0 for ch in guess if freqs[ch] <= stats["weak_threshold"]) / 4.0,
-        }
-
-    def trigger_bonus(self, stats: Dict[str, object], guess: Code, is_candidate: bool, normal_exp: float, avg_exp: float, normal_max: int, avg_max: int, bull_score: float, history: List[Tuple[Code, Feedback]]) -> float:
-        n = stats["n"]
-        bonus = 0.0
-        total_b = self.total_bulls(history)
-        last_b = self.last_fb(history)[0]
-        if total_b > 0 or last_b > 0:
-            if normal_exp <= avg_exp * 1.28 + 2.0 and normal_max <= avg_max * 1.45 + 3:
-                threshold = 0.34 if n <= 30 else 0.30
-                if total_b >= 3:
-                    threshold -= 0.03
-                if last_b >= 2:
-                    threshold -= 0.03
-                if bull_score >= threshold:
-                    bonus += 0.35 + 0.12 * min(total_b, 4) + 0.15 * min(last_b, 3) + (0.25 if n <= 20 else 0.0)
-        if n <= 80:
-            quad: Counter[str] = stats["quad"]
-            q = quad["".join(sorted(guess))]
-            top = stats["top_quad_count"]
-            second = stats["second_quad_count"]
-            if top > 0 and q >= top * 0.90 and normal_exp <= avg_exp * 1.35 + 2.0 and normal_max <= avg_max * 1.55 + 3:
-                dominant = second == 0 or top >= second * 1.35 or top / n >= 0.18
-                bonus += 0.35 + (0.35 if is_candidate else 0.0) + (0.35 if dominant else 0.0) + (0.35 if n <= 20 else 0.0)
-        return bonus
-
-    @staticmethod
-    def semi_brake(normal_exp: float, normal_max: int, avg_exp: float, avg_max: int, trigger: float, is_candidate: bool, phase: str, n: int, fallback_mode: int) -> float:
-        if phase == "endgame" or fallback_mode != 0 or not (30 <= n <= 100) or trigger > 0:
-            return 0.0
-        penalty = 0.050 * max(0.0, normal_exp - (avg_exp * 1.05 + 1.0)) + 0.120 * max(0.0, normal_max - (avg_max * 1.12 + 2.0))
-        return penalty * 0.8 if is_candidate else penalty
-
     def choose(self, history: History, top_k: int = 15) -> Dict[str, object]:
         normalized = normalize_history(history)
+        investigation = self.investigation_state(normalized)
 
         # Serve opening book without loading the matrix.
         if len(normalized) == 0:
-            return {"phase": "opening_first", "candidates": ALL_CODES, "recommendations": [{"guess": OPENING_FIRST, "score": 0.0, "is_candidate": True, "reason": "fixed first guess"}]}
+            opening_action = self.classify_action(OPENING_FIRST, normalized, investigation, True)
+            return {"phase": "opening_first", "investigation": investigation, "candidates": ALL_CODES, "recommendations":[{"guess": OPENING_FIRST, "score": 0.0, "is_candidate": True, "reason": "fixed first guess", "action": opening_action}]}
         if len(normalized) == 1 and normalized[0][0] == OPENING_FIRST:
             second = OPENING_SECOND_BY_FEEDBACK.get(normalized[0][1])
             if second is not None:
-                return {"phase": "opening_second", "candidates": [], "recommendations": [{"guess": second, "score": 0.0, "is_candidate": False, "reason": "opening book: stable AVG second move"}]}
+                second_action = self.classify_action(second, normalized, investigation, False)
+                return {"phase": "opening_second", "investigation": investigation, "candidates": [], "recommendations":[{"guess": second, "score": 0.0, "is_candidate": False, "reason": "opening book: stable AVG second move", "action": second_action}]}
 
         candidates = self.filter_candidates(normalized)
+        if not candidates:
+            investigation["task_status"] = "state_inconsistent"
+            return {
+                "phase": "inconsistent",
+                "investigation": investigation,
+                "candidates": [],
+                "recommendations": [],
+                "raw_recommendations": [],
+                "task_eligible_count": 0,
+            }
         phase = self.game_phase(normalized, candidates)
         stats = self.stats(candidates)
         n = stats["n"]
@@ -547,79 +1194,70 @@ class QuestLineSolver:
         if phase == "endgame" and len(candidates) <= 10 and avg_max == 1:
             return {
                 "phase": phase,
+                "investigation": investigation,
                 "candidates": [ALL_CODES[i] for i in candidates],
                 "avg_anchor": {"guess": ALL_CODES[avg_index], "exp": avg_exp, "max": avg_max, "bucket_count": avg_bucket_count},
-                "fallback_mode": self.fallback_mode(normalized),
-                "recommendations": [{"guess": ALL_CODES[avg_index], "score": avg_exp, "is_candidate": avg_index in candidate_set, "reason": "perfect endgame split"}],
+                "recommendations": [{"guess": ALL_CODES[avg_index], "score": avg_exp, "is_candidate": avg_index in candidate_set, "reason": "perfect endgame split", "action": self.classify_action(ALL_CODES[avg_index], normalized, investigation, avg_index in candidate_set)}],
             }
 
-        phase_weights = self.phase_weights(phase, n, normalized)
-        er, es, mr, ms = self.guard(phase, n, normalized)
-        fallback = self.fallback_mode(normalized)
+        policy = investigation["task_policy"]
+        exp_limit = avg_exp * policy["expected_ratio"] + policy["expected_slack"]
+        max_limit = avg_max * policy["max_ratio"] + policy["max_slack"]
         scored: List[Dict[str, object]] = []
         for guess_index, guess in enumerate(ALL_CODES):
             weighted_exp, weighted_max, bucket_count = self.weighted_stats(candidates, guess_index, weights)
             normal_exp, normal_max, _ = self.avg_remaining(candidates, guess_index)
             main_exp, _, _ = self.avg_remaining(main_candidates, guess_index)
             is_candidate = guess_index in candidate_set
-            features = self.score_guess_features(guess, stats, normalized, used)
-            direct = weights.get(guess_index, 0.0)
-            trigger = self.trigger_bonus(stats, guess, is_candidate, normal_exp, avg_exp, normal_max, avg_max, features["bull"], normalized)
-            score = (
-                phase_weights["w_exp"] * weighted_exp
-                + phase_weights["normal_exp"] * normal_exp
-                + phase_weights["main_exp"] * main_exp
-                + phase_weights["max_weight"] * weighted_max * n
-                + phase_weights["digit"] * features["digit"]
-                + phase_weights["pair"] * features["pair"]
-                + phase_weights["triple"] * features["triple"]
-                + phase_weights["quad"] * features["quad"]
-                + phase_weights["fixed_group"] * features["fixed_group"]
-                + phase_weights["rotation"] * features["rotation"]
-                + phase_weights["bull"] * features["bull"]
-                + phase_weights["weak_penalty"] * features["weak"]
-                + phase_weights["direct_prob"] * direct
-                + phase_weights["candidate_bonus"] * int(is_candidate)
-                + phase_weights["non_candidate_penalty"] * int(not is_candidate)
-                + phase_weights["trigger_bonus"] * trigger
-            )
-            brake = self.semi_brake(normal_exp, normal_max, avg_exp, avg_max, trigger, is_candidate, phase, n, fallback)
-            score += brake
             scored.append({
                 "guess": guess,
-                "score": score,
                 "is_candidate": is_candidate,
                 "weighted_expected": weighted_exp,
                 "normal_expected": normal_exp,
                 "normal_max_bucket": normal_max,
                 "main_world_expected": main_exp,
-                "direct_prob": direct,
                 "bucket_count": bucket_count,
-                "bull_score": features["bull"],
-                "quad_strength": features["quad"],
-                "trigger_bonus": trigger,
-                "brake_penalty": brake,
             })
-        scored.sort(key=lambda x: (x["score"], x["guess"]))
-        guarded = [x for x in scored if x["normal_expected"] <= avg_exp * er + es + 1e-9 and x["normal_max_bucket"] <= avg_max * mr + ms]
-        if not guarded:
+            scored[-1]["action"] = self.classify_action(guess, normalized, investigation, is_candidate)
+        guarded = [
+            x for x in scored
+            if x["normal_expected"] <= exp_limit + 1e-9
+            and x["normal_max_bucket"] <= max_limit
+        ]
+        task = investigation.get("task")
+        structurally_eligible = [x for x in scored if self.action_is_eligible(x["action"], task)]
+        task_eligible = [x for x in guarded if self.action_is_eligible(x["action"], task)]
+        if task_eligible:
+            guarded = task_eligible
+            investigation["task_status"] = "ready"
+        elif structurally_eligible:
+            guarded = structurally_eligible
+            investigation["task_status"] = "task_relaxable"
+        else:
             guarded = scored
-        if all(x["guess"] != ALL_CODES[avg_index] for x in guarded):
+            investigation["task_status"] = "task_infeasible"
+            investigation["next_task"] = self.task_transition(task)
+        if all(x["guess"] != ALL_CODES[avg_index] for x in guarded) and not structurally_eligible:
             avg_item = next((x for x in scored if x["guess"] == ALL_CODES[avg_index]), None)
             if avg_item:
                 guarded.append(avg_item)
-        guarded.sort(key=lambda x: (x["score"], x["guess"]))
+        guarded.sort(key=lambda x: self.task_sort_key(x, investigation))
+        action_summary = Counter(item["action"]["type"] for item in guarded)
         return {
             "phase": phase,
+            "investigation": investigation,
             "candidates": [ALL_CODES[i] for i in candidates],
             "avg_anchor": {"guess": ALL_CODES[avg_index], "exp": avg_exp, "max": avg_max, "bucket_count": avg_bucket_count},
-            "fallback_mode": fallback,
+            "task_policy": policy,
+            "action_summary": dict(action_summary),
+            "task_eligible_count": len(task_eligible),
             "recommendations": guarded[:top_k],
-            "raw_recommendations": scored[:top_k],
+            "raw_recommendations": guarded[:top_k],
         }
 
     def next_guess(self, history: History) -> Code:
         return self.choose(history, top_k=1)["recommendations"][0]["guess"]
+
 
     def play_answer(self, answer: Code, max_steps: int = 10) -> List[Tuple[Code, Feedback, int]]:
         answer = validate_code(answer)
@@ -634,6 +1272,7 @@ class QuestLineSolver:
             if fb == (4, 0):
                 break
         return rows
+
 
 
 _DEFAULT_SOLVER: Optional[QuestLineSolver] = None
@@ -679,9 +1318,9 @@ def print_report(history: History, top_k: int = 15) -> None:
         if isinstance(rec, dict):
             reason = rec.get("reason")
             if reason:
-                print(f"{i:2d}. {rec['guess']} score={rec['score']:.3f}  {reason}")
+                print(f"{i:2d}. {rec['guess']}  {reason}")
             else:
-                print(f"{i:2d}. {rec['guess']} score={rec['score']:.3f} AVG={rec['normal_expected']:.3f} max={rec['normal_max_bucket']} trig={rec['trigger_bonus']:.2f} brake={rec['brake_penalty']:.3f}")
+                print(f"{i:2d}. {rec['guess']} AVG={rec['normal_expected']:.3f} max={rec['normal_max_bucket']}")
     print("=" * 80)
 
 

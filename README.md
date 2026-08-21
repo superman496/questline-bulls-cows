@@ -1,5 +1,13 @@
 # QuestLine
 
+**Version 1.3**
+
+Version 1.3 is the **Narrative Engine Refactor**. It changes the engine from a
+round-oriented scorer into a fact-driven investigation system. The old scoring
+patch layer is no longer the source of strategy decisions; task policy,
+candidate facts, group relations, position evidence, and world-line changes
+now form the decision chain.
+
 **A narrative-driven Bulls & Cows solver.**  
 **Follow the strongest story. Distrust coincidence.**
 
@@ -63,13 +71,16 @@ Endgame: compress exactly.
 - Deterministic lexicographic tie-breaks.
 - Fast feedback matrix for interactive use.
 - Human-readable reports.
+- World-line analysis in reports: main fixed-digit groups, support rates, and support changes over time.
+- StoryBook chapters that connect state, action, feedback, facts, and world-line changes.
+- Three narrative CLI modes: Assist, Simulation, and Adventure.
 - Compatible helper functions:
   - `choose_human_like_guess(history, top_k=15)`
   - `print_report(history)`
   - `interactive()`
 - Built-in class API:
-  - `BullsCowsSolver.next_guess(history)`
-  - `BullsCowsSolver.play_answer(answer)`
+  - `QuestLineSolver.next_guess(history)`
+  - `QuestLineSolver.play_answer(answer)`
 
 ---
 
@@ -91,9 +102,9 @@ python questline.py
 Or use QuestLine from Python:
 
 ```python
-from questline import BullsCowsSolver
+from questline import QuestLineSolver
 
-solver = BullsCowsSolver()
+solver = QuestLineSolver()
 
 history = [
     ("0123", "0b1c"),
@@ -116,6 +127,14 @@ history = [
 print_report(history)
 ```
 
+Reports also expose the current world-line picture: the strongest fixed-digit
+groups (`01`, `23`, `45`, `67`, `89`), their candidate support, the leading
+margin over the next world, and the most supported 2-, 3-, and 4-digit
+patterns. This is observability only in v1.3; it does not retune recommendation
+scoring yet.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the complete 1.3 engine migration record.
+
 Interactive mode:
 
 ```python
@@ -124,14 +143,35 @@ from questline import interactive
 interactive()
 ```
 
+### CLI modes
+
+The standalone CLI uses one narrative vocabulary for all three ways to play:
+
+1. **Assist mode / 协查模式** — the user plays an external game and enters
+   feedback; QuestLine interprets the evidence and recommends the next action.
+2. **Simulation mode / 推演模式** — the user supplies the answer; QuestLine
+   acts step by step and exposes how it discovers the answer.
+3. **Adventure mode / 冒险模式** — QuestLine creates a hidden answer; the user
+   guesses while the system returns feedback and develops the story.
+
+```bash
+python questline_cli_v1_3_standalone.py --mode assist
+python questline_cli_v1_3_standalone.py --mode simulation --answer 0456
+python questline_cli_v1_3_standalone.py --mode adventure
+```
+
+During Simulation and Adventure, enter `story` or `book` to read the current
+case book. The previous parameter names `solver`, `explore`, and `story` remain
+accepted as compatibility aliases.
+
 ---
 
 ## Example
 
 ```python
-from questline import BullsCowsSolver, fb_to_str
+from questline import QuestLineSolver, fb_to_str
 
-solver = BullsCowsSolver()
+solver = QuestLineSolver()
 answer = "0456"
 
 for guess, feedback, remaining in solver.play_answer(answer):

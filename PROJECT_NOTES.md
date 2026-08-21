@@ -2,9 +2,9 @@
 
 > Project handoff and development notes for QuestLine.
 >
-> Current stable milestone: **v1.2.0 – Stable CLI Interaction Layer**
+> Current stable milestone: **v1.3.0 – Narrative Engine Refactor**
 >
-> Next milestone: **v1.3.0 – World-line Analysis**
+> Next milestone: **v1.4.0 – Multi-mode GameSession and richer story orchestration**
 
 ---
 
@@ -41,7 +41,7 @@ v1.2.0
 Current stable CLI file:
 
 ```text
-questline_cli_v1_2_standalone.py
+questline_cli_v1_3_standalone.py
 ```
 
 The v1.2.0 tag marks the stable interaction layer before starting v1.3 world-line analysis.
@@ -49,8 +49,8 @@ The v1.2.0 tag marks the stable interaction layer before starting v1.3 world-lin
 Recommended run commands:
 
 ```bash
-python questline_cli_v1_2_standalone.py --lang zh
-python questline_cli_v1_2_standalone.py --lang en
+python questline_cli_v1_3_standalone.py --lang zh
+python questline_cli_v1_3_standalone.py --lang en
 ```
 
 ---
@@ -61,7 +61,7 @@ Core files:
 
 ```text
 questline.py                      # Core solver engine
-questline_cli_v1_2_standalone.py  # Stable v1.2 CLI interaction layer
+questline_cli_v1_3_standalone.py  # Stable v1.3 narrative CLI
 benchmark_full.py                 # Full 5040-answer benchmark
 README.md                         # Public project documentation
 CONTRIBUTING.md                   # Contribution notes
@@ -557,7 +557,7 @@ Alternate timeline.
 
 Before starting v1.3:
 
-1. Keep `questline_cli_v1_2_standalone.py` as the stable CLI.
+1. Keep `questline_cli_v1_3_standalone.py` as the stable CLI.
 2. Add this file as `PROJECT_NOTES.md`.
 3. Optionally rename the stable CLI later to:
 
