@@ -72,7 +72,7 @@ TEXT = {
         "slogan": "沿着最可信的世界线逼近真相，不轻信巧合。",
         "rules": "规则：4 位不重复数字，允许前导 0。",
         "feedback": "反馈示例：40、4:0、4x0、4b0c、1，2、1、2、(1,2)",
-        "commands": "指令：q/quit 退出，new/restart 新局，undo/back 撤回，history/h 历史，story/book 故事书，report/r 报告，help/? 帮助",
+        "commands": "指令：q/quit 退出，new/restart 新局，undo/back 撤回，history/h 历史，story/book 故事书，report/r 报告，save/replay/export，help/? 帮助",
         "input_help": "输入语法：2位=反馈；3位=推荐编号+反馈；6位=手动猜法+反馈。例如 40、411、932840。",
         "round": "第 {n} 轮",
         "next": "默认下一手",
@@ -154,7 +154,7 @@ TEXT = {
         "slogan": "Follow the strongest story. Distrust coincidence.",
         "rules": "Rules: 4 distinct digits, leading zero allowed.",
         "feedback": "Feedback examples: 40, 4:0, 4x0, 4b0c, 1,2, (1,2)",
-        "commands": "Commands: q/quit, new/restart, undo/back, history/h, story/book, report/r, help/?",
+        "commands": "Commands: q/quit, new/restart, undo/back, history/h, story/book, report/r, save/replay/export, help/?",
         "input_help": "Input grammar: 2 digits=feedback; 3 digits=menu+feedback; 6 digits=manual guess+feedback. Examples: 40, 411, 932840.",
         "round": "Round {n}",
         "next": "Default next guess",
@@ -432,6 +432,9 @@ def print_help(lang: str) -> None:
     print("  9328 4 0 -> manual 9328 + 4b0c")
     print("  story    -> read the current case book")
     print("  book     -> read the current case book")
+    print("  save     -> save the current replay JSON")
+    print("  replay   -> print structured replay JSON")
+    print("  export   -> export the current case as Markdown")
     print("  --mode assist      -> 协查模式：用户行动，引擎解释")
     print("  --mode simulation  -> 推演模式：用户给出答案，引擎行动")
     print("  --mode adventure   -> 冒险模式：系统出题，用户行动")
@@ -451,6 +454,52 @@ def print_story(history: History, solver: Any, lang: str, include_indexes: bool 
     print(book.render(include_indexes=include_indexes))
 
 
+def save_case_json(history: History, replay: ReplayRows, solver: Any, lang: str) -> Path:
+    path = Path(f"questline_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    data = {
+        "project": "QuestLine",
+        "ui_language": lang,
+        "mode": "assist",
+        "history": [(guess, fb_text(feedback)) for guess, feedback in history],
+        "replay": replay,
+        "story": questline.StoryBook.from_history(history, solver=solver).to_dict(),
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def export_case_markdown(history: History, solver: Any) -> Path:
+    path = Path(f"questline_case_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+    path.write_text(
+        questline.StoryBook.from_history(history, solver=solver).render(include_indexes=True),
+        encoding="utf-8",
+    )
+    return path
+
+
+def print_replay_json(history: History, replay: ReplayRows, solver: Any) -> None:
+    payload = {
+        "history": [(guess, fb_text(feedback)) for guess, feedback in history],
+        "accepted": replay,
+        "story": questline.StoryBook.from_history(history, solver=solver).to_dict(),
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def handle_case_command(command: str, history: History, replay: ReplayRows, solver: Any, lang: str) -> bool:
+    """Handle non-mutating case inspection and export commands."""
+    if command == "save":
+        print(tr(lang, "saved", path=save_case_json(history, replay, solver, lang)))
+    elif command == "replay":
+        print_replay_json(history, replay, solver)
+    elif command == "export":
+        path = export_case_markdown(history, solver)
+        print(f"已导出案件 Markdown：{path}" if lang == "zh" else f"Case Markdown exported: {path}")
+    else:
+        return False
+    return True
+
+
 def story_answer(rng: Optional[random.Random] = None) -> str:
     """Create a hidden answer for the system-led story mode."""
     source = rng or random
@@ -465,7 +514,7 @@ def story_feedback(answer: str, guess: str) -> Feedback:
 def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: Optional[random.Random] = None) -> bool:
     """Run a system-led game where each guess advances the case book."""
     hidden_answer = answer or story_answer(rng)
-    history: History = []
+    session = questline.GameSession(mode="adventure", solver=solver, answer=hidden_answer)
     print("\n[冒险模式]" if lang == "zh" else "\n[Adventure mode]")
     print("系统已经建立案件。请输入 4 位不重复数字开始调查。" if lang == "zh" else "The case is ready. Enter four distinct digits to investigate.")
     while True:
@@ -477,7 +526,7 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         if low in {"q", "quit", "exit"}:
             return False
         if low in {"story", "book"}:
-            print_story(history, solver, lang)
+            print(session.read_story(include_indexes=True))
             continue
         if low in {"h", "help", "?"}:
             print("输入 4 位不重复数字；story/book 查看故事；q 退出。" if lang == "zh" else "Enter four distinct digits; story/book reads the case; q quits.")
@@ -487,17 +536,16 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         except ValueError as exc:
             print(tr(lang, "invalid", err=exc))
             continue
-        if any(previous_guess == guess for previous_guess, _ in history):
+        if any(previous_guess == guess for previous_guess, _ in session.history):
             print(tr(lang, "duplicate_same", guess=guess, fb=""))
             continue
         feedback = story_feedback(hidden_answer, guess)
-        history.append((guess, feedback))
+        event = session.apply_turn(guess, feedback, source="Manual")
         print(f"反馈 / Feedback: {fb_text(feedback)}")
-        event = solver.explain_transition(history[:-1], guess, feedback)
         print(event["narrative"])
         if feedback == (4, 0):
             print("\n案件告破。" if lang == "zh" else "\nCase solved.")
-            print_story(history, solver, lang)
+            print(session.read_story(include_indexes=True))
             return True
 
 
@@ -515,18 +563,17 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
     else:
         answer = validate_guess_digits(answer, lang)
 
-    history: History = []
+    session = questline.GameSession(mode="simulation", solver=solver, answer=answer)
     print("\n[推演模式]" if lang == "zh" else "\n[Simulation mode]")
     print("答案已锁定，由引擎负责推进调查。" if lang == "zh" else "The answer is locked; the engine will lead the investigation.")
     for _ in range(max_steps):
-        guess = solver.next_guess(history)
-        feedback = story_feedback(answer, guess)
-        event = solver.explain_transition(history, guess, feedback)
-        history.append((guess, feedback))
-        print(f"\n第 {len(history)} 轮：引擎选择 {guess}，反馈 {fb_text(feedback)}" if lang == "zh" else f"\nRound {len(history)}: engine chose {guess}, feedback {fb_text(feedback)}")
+        event = session.simulation_step()
+        guess = event["action"]["guess"]
+        feedback = questline.parse_feedback(event["action"]["feedback"])
+        print(f"\n第 {session.round} 轮：引擎选择 {guess}，反馈 {fb_text(feedback)}" if lang == "zh" else f"\nRound {session.round}: engine chose {guess}, feedback {fb_text(feedback)}")
         print(event["narrative"])
         if feedback == (4, 0):
-            print_story(history, solver, lang)
+            print(session.read_story(include_indexes=True))
             return True
         try:
             command = input("回车继续，story 查看故事，q 退出: ").strip().lower()
@@ -535,9 +582,9 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
         if command in {"q", "quit", "exit"}:
             return False
         if command in {"story", "book"}:
-            print_story(history, solver, lang)
+            print(session.read_story(include_indexes=True))
     print("达到探索步数上限。" if lang == "zh" else "Exploration step limit reached.")
-    print_story(history, solver, lang)
+    print(session.read_story(include_indexes=True))
     return False
 
 
@@ -941,6 +988,7 @@ def game_loop(lang: str, solver: Any, debug: bool = False) -> bool:
                 continue
             if low in {"h", "history"}: print_history(history, lang); continue
             if low in {"story", "book"}: print_story(history, solver, lang); continue
+            if handle_case_command(low, history, replay, solver, lang): continue
             replaced = try_replace_last(raw, history, replay, solver, lang)
             if replaced is not None: return replaced
             print(tr(lang, "correction_prompt")); continue
@@ -957,6 +1005,7 @@ def game_loop(lang: str, solver: Any, debug: bool = False) -> bool:
         if low in {"h", "history"}: print_history(history, lang); continue
         if low in {"story", "book"}: print_story(history, solver, lang); continue
         if low in {"r", "report"}: print_report(solver, history, lang, state); continue
+        if handle_case_command(low, history, replay, solver, lang): continue
         if low in {"undo", "back"}:
             if history:
                 g, fb = history.pop()

@@ -170,3 +170,28 @@ CLI Adapter       WebUI Adapter
 story, status, and turn transitions. `StoryBook` should grow from an event
 sequence into a complete case narrative with chapters, turning points,
 rejected hypotheses, current suspense, and closure.
+
+### 1.4 implementation boundary
+
+`GameSession` is now the shared orchestration object. It exposes structured
+state and transition data through `current_state()`, `timeline()`, `to_dict()`,
+`save()`, and `resume()`. The three modes differ only in who supplies the
+action or feedback:
+
+The `current_state()` read model includes the investigation state plus digit
+profiles, group states and relations, world-line analysis, chapter metadata,
+current suspense, and the latest transition. This is the intended WebUI data
+boundary.
+
+- Assist accepts a user guess and feedback.
+- Simulation chooses the next action and calculates feedback from its hidden
+  answer.
+- Adventure accepts a user guess and calculates truthful feedback from the
+  hidden answer.
+
+The CLI is a reference adapter; clients should consume the session snapshot and
+StoryBook events directly rather than parse terminal text.
+
+Rejected feedback is recorded in the session replay audit but is not appended
+to `history` or `StoryBook`. This keeps the investigation's world-line factual
+while preserving evidence of an input mistake or an attempted false feedback.

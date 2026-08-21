@@ -42,7 +42,7 @@ QuestLine 1.3 is an engine refactor, not a parameter-tuning release.
 - 500-answer behavior benchmark: average `4.7580` steps, maximum `6`.
 - The benchmark is observability-only and does not retune recommendation scores.
 
-## 1.4.0 — GameSession and Narrative Productization (Planned)
+## 1.4.0 — GameSession and Narrative Productization
 
 The 1.4 development line starts from the completed 1.3 engine refactor.
 
@@ -55,19 +55,30 @@ The 1.4 development line starts from the completed 1.3 engine refactor.
 - Keep CLI as a reference client and debugging surface, not as the product
   architecture.
 
-### Planned work
+### Completed in this iteration
 
-- Define stable session state, action, feedback, transition, and status
-  contracts.
-- Route all three modes through the same session transition pipeline.
-- Add chapter state, character profiles, group relations, world-line history,
-  turning points, rejected hypotheses, current suspense, and case closure.
-- Expose structured read APIs for future WebUI clients: current state,
-  timeline, digits, groups, worlds, chapters, and next action.
-- Preserve the 1.3 engine decision logic while improving session orchestration
-  and presentation.
-- Add session save/resume, replay, Markdown export, and fault/cheating
-  feedback scenarios after the core contracts stabilize.
+- Added `GameSession` as the shared state layer for all three modes.
+- Added stable session statuses: active, logically solved, solved, and
+  inconsistent.
+- Routed Simulation and Adventure through the same transition pipeline used by
+  Assist.
+- Added structured read APIs: `current_state()`, `timeline()`, `read_story()`,
+  `save()`, `resume()`, and `to_dict()`.
+- Kept the 1.3 engine decision logic unchanged; this release adds orchestration
+  and product state rather than score tuning.
+
+### 1.4.x additions
+
+- Added session replay data separating accepted transitions from rejected
+  attempts.
+- Added Markdown case export through `GameSession.export_markdown()`.
+- Added explicit rejection handling for contradictory feedback and Adventure
+  mode cheating; rejected input never contaminates the StoryBook.
+- Save/resume now preserves rejected-attempt audit records.
+- Expanded `current_state()` into a WebUI read model containing digits, groups,
+  group relations, world-line data, chapters, suspense, and the last event.
+- Added CLI `save`, `replay`, and `export` commands for case inspection and
+  handoff.
 
 ### Design boundary
 

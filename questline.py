@@ -1501,6 +1501,7 @@ class GameSession:
         self.status = self.ACTIVE
         self.logical_answer: Optional[Code] = None
         self.last_event: Optional[Dict[str, object]] = None
+        self.rejected_turns: List[Dict[str, object]] = []
 
     @property
     def round(self) -> int:
@@ -1542,16 +1543,18 @@ class GameSession:
                 raise ValueError("Adventure mode requires a hidden answer.")
             actual_feedback = self.solver.feedback(self.answer, guess)
             if feedback is not None and validate_feedback(parse_feedback(feedback)) != actual_feedback:
+                self._reject_turn(guess, feedback, "feedback does not match the hidden answer", source)
                 raise ValueError("Adventure feedback does not match the hidden answer.")
             parsed_feedback = actual_feedback
         else:
             if feedback is None:
                 raise ValueError("This mode requires feedback.")
             parsed_feedback = validate_feedback(parse_feedback(feedback))
-        event = self.story.add_turn(self.history, guess, parsed_feedback)
         trial = self.history + [(guess, parsed_feedback)]
         if not self.solver.filter_candidates(trial):
-            self.status = self.INCONSISTENT
+            self._reject_turn(guess, parsed_feedback, "feedback leaves no possible answer", source)
+            raise ValueError("Feedback leaves no possible answer.")
+        event = self.story.add_turn(self.history, guess, parsed_feedback)
         self.history.append((guess, parsed_feedback))
         self.last_event = event
         if parsed_feedback == (CODE_LEN, 0):
@@ -1560,6 +1563,15 @@ class GameSession:
             self.state()
         event["session"] = {"mode": self.mode, "status": self.status, "round": self.round, "source": source}
         return event
+
+    def _reject_turn(self, guess: Code, feedback: object, reason: str, source: str) -> None:
+        self.rejected_turns.append({
+            "round": self.round + 1,
+            "guess": guess,
+            "feedback": fb_to_str(parse_feedback(feedback)) if feedback is not None else None,
+            "source": source,
+            "reason": reason,
+        })
 
     def simulation_step(self) -> Dict[str, object]:
         if self.mode != "simulation":
@@ -1576,10 +1588,74 @@ class GameSession:
 
     def current_state(self) -> Dict[str, object]:
         """Structured read API for clients such as a future WebUI."""
-        return self.state()
+        state = self.state()
+        investigation = state["investigation"]
+        world_line = self.solver.world_line_analysis(self.history)
+        state.update({
+            "digits": investigation.get("digit_status", {}),
+            "groups": investigation.get("group_states", {}),
+            "group_relations": investigation.get("group_relations", {}),
+            "world_line": world_line,
+            "chapters": list(self.story.chapters),
+            "suspense": self._suspense(state),
+            "last_event": self.last_event,
+        })
+        return state
+
+    @staticmethod
+    def _suspense(state: Dict[str, object]) -> Dict[str, object]:
+        """Expose a small narrative status object for UI clients."""
+        investigation = state.get("investigation", {})
+        candidate_count = int(state.get("candidate_count", 0))
+        task = investigation.get("task")
+        if state.get("status") == GameSession.SOLVED:
+            level, title = "resolved", "案件已告破"
+        elif state.get("status") == GameSession.INCONSISTENT:
+            level, title = "fractured", "证据链出现矛盾"
+        elif candidate_count == 1:
+            level, title = "final", "真相只剩一条解释"
+        elif task == "resolve_endgame":
+            level, title = "closing", "外围解释正在收束"
+        elif task == "resolve_group_conflict":
+            level, title = "turning_point", "组内关系等待拆分"
+        else:
+            level, title = "open", "案件仍在展开"
+        return {"level": level, "title": title, "candidate_count": candidate_count, "task": task}
 
     def timeline(self) -> List[Dict[str, object]]:
         return list(self.story.events)
+
+    def replay(self) -> Dict[str, object]:
+        """Return accepted transitions and rejected attempts for replay clients."""
+        return {
+            "mode": self.mode,
+            "status": self.status,
+            "accepted": [
+                {
+                    "round": event["round"],
+                    "guess": event["action"]["guess"],
+                    "feedback": event["action"]["feedback"],
+                    "source": event.get("session", {}).get("source", "QuestLine"),
+                    "chapter": event.get("chapter"),
+                }
+                for event in self.story.events
+            ],
+            "rejected": list(self.rejected_turns),
+        }
+
+    def export_markdown(self, include_indexes: bool = True) -> str:
+        """Export the current case as a portable Markdown case file."""
+        lines = [self.read_story(include_indexes=include_indexes), "", "## 会话信息"]
+        lines.append(f"- 模式：{self.mode}")
+        lines.append(f"- 状态：{self.status}")
+        lines.append(f"- 已接受行动：{len(self.history)}")
+        if self.rejected_turns:
+            lines.extend(["", "## 被拒绝的输入"])
+            for item in self.rejected_turns:
+                lines.append(
+                    f"- 第{item['round']}轮，{item['guess']} / {item['feedback'] or '未提供反馈'}：{item['reason']}"
+                )
+        return "\n".join(lines)
 
     def save(self, include_answer: bool = False) -> Dict[str, object]:
         """Return a JSON-safe session snapshot suitable for save/resume."""
@@ -1596,12 +1672,15 @@ class GameSession:
         for row in snapshot.get("history", []):
             guess, feedback = row
             session.apply_turn(str(guess), str(feedback))
+        session.rejected_turns = list(snapshot.get("rejected_turns", snapshot.get("replay", {}).get("rejected", [])))
         return session
 
     def to_dict(self, include_answer: bool = False) -> Dict[str, object]:
-        data = self.state()
+        data = self.current_state()
         data["history"] = [(guess, fb_to_str(feedback)) for guess, feedback in self.history]
         data["story"] = self.story.to_dict()
+        data["rejected_turns"] = list(self.rejected_turns)
+        data["replay"] = self.replay()
         if include_answer and self.answer is not None:
             data["answer"] = self.answer
         return data
