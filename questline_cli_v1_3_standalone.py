@@ -512,12 +512,78 @@ def story_feedback(answer: str, guess: str) -> Feedback:
     return questline.raw_feedback(answer, guess)
 
 
+def print_adventure_guidance(session: questline.GameSession, solver: Any, lang: str) -> None:
+    """Show actionable investigation guidance without revealing the answer."""
+    result = solver.choose(session.history, top_k=3)
+    investigation = result.get("investigation") or {}
+    candidates = solver.filter_candidates(session.history)
+    task_labels = {
+        "establish_foundation": "建立基础事实",
+        "introduce_45": "引入 45 组",
+        "cross_test_new_group": "交叉测试新组",
+        "investigate_outer_groups": "调查外围组",
+        "converge_outer_choice": "选择性收束外围解释",
+        "resolve_group_conflict": "解决组内冲突",
+        "apply_position_pressure": "验证数字位置",
+        "resolve_endgame": "收束残局",
+    }
+    task = investigation.get("task", "")
+    print(f"当前剩余可能世界：{len(candidates)}" if lang == "zh" else f"Remaining worlds: {len(candidates)}")
+    print(f"当前调查任务：{task_labels.get(task, task)}" if lang == "zh" else f"Investigation task: {task}")
+    print(f"已调查组：{', '.join(investigation.get('tested_groups', [])) or '无'}；待调查组：{', '.join(investigation.get('untested_groups', [])) or '无'}" if lang == "zh" else f"Tested groups: {', '.join(investigation.get('tested_groups', [])) or 'none'}; untested groups: {', '.join(investigation.get('untested_groups', [])) or 'none'}")
+    recommendations = result.get("recommendations", [])[:3]
+    if recommendations:
+        print("下一步建议：" if lang == "zh" else "Suggested next moves:")
+        for index, item in enumerate(recommendations, 1):
+            action = item.get("action", {})
+            reason = item.get("reason") or action.get("reason") or "推进当前调查"
+            if lang == "zh":
+                reason = {
+                    "fixed first guess": "建立第一层基础事实",
+                    "opening book: stable AVG second move": "引入 45 组，建立共同参照",
+                    "introduces untested groups": "引入尚未调查的小组",
+                    "reuses tested digits in new positions": "用新位置验证已有数字",
+                    "tests a remaining candidate directly": "直接验证一个残局候选",
+                    "tests a remaining candidate": "测试一个仍在候选空间中的答案",
+                    "primarily separates feedback buckets": "拆分当前反馈桶，缩小世界线",
+                }.get(reason, reason)
+            if lang == "zh":
+                print(f"  {index}. {item['guess']}：{reason}")
+            else:
+                print(f"  {index}. {item['guess']}: {reason}")
+
+
+def print_adventure_situation(session: questline.GameSession, lang: str) -> None:
+    """Show the adventure situation without exposing an engine recommendation."""
+    state = session.current_state()
+    investigation = state.get("investigation", {})
+    task_labels = {
+        "establish_foundation": "建立基础事实",
+        "introduce_45": "引入 45 组",
+        "cross_test_new_group": "交叉测试新组",
+        "investigate_outer_groups": "调查外围组",
+        "converge_outer_choice": "选择性收束外围解释",
+        "resolve_group_conflict": "解决组内冲突",
+        "apply_position_pressure": "验证数字位置",
+        "resolve_endgame": "收束残局",
+    }
+    if lang == "zh":
+        print(f"局势判断：剩余 {state['candidate_count']} 个可能世界；当前任务是{task_labels.get(investigation.get('task'), investigation.get('task', '继续调查'))}。")
+        print(f"已调查组：{', '.join(investigation.get('tested_groups', [])) or '无'}；待调查组：{', '.join(investigation.get('untested_groups', [])) or '无'}。")
+        print("线索提示：可以输入 r 请求分析建议，但当前案件不会直接替你选择猜法。")
+    else:
+        print(f"Situation: {state['candidate_count']} worlds remain; task: {investigation.get('task', 'continue investigating')}.")
+        print(f"Tested groups: {', '.join(investigation.get('tested_groups', [])) or 'none'}; untested groups: {', '.join(investigation.get('untested_groups', [])) or 'none'}.")
+        print("Hint: use r for analysis; Adventure does not choose a guess for you automatically.")
+
+
 def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: Optional[random.Random] = None) -> bool:
     """Run a system-led game where each guess advances the case book."""
     hidden_answer = answer or story_answer(rng)
     session = questline.GameSession(mode="adventure", solver=solver, answer=hidden_answer)
     print("\n[冒险模式]" if lang == "zh" else "\n[Adventure mode]")
     print("系统已经建立案件。请输入 4 位不重复数字开始调查。" if lang == "zh" else "The case is ready. Enter four distinct digits to investigate.")
+    print_adventure_situation(session, lang)
     while True:
         try:
             raw = input("猜测 / Guess: ").strip()
@@ -532,8 +598,11 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         if low in {"book full", "book+", "audit"}:
             print(session.story.render_audit())
             continue
+        if low in {"r", "report"}:
+            print_adventure_guidance(session, solver, lang)
+            continue
         if low in {"h", "help", "?"}:
-            print("输入 4 位不重复数字；story/book 查看故事；q 退出。" if lang == "zh" else "Enter four distinct digits; story/book reads the case; q quits.")
+            print("输入 4 位不重复数字；r 查看当前调查建议；book 查看案件主线；book full 查看完整审计；q 退出。" if lang == "zh" else "Enter four distinct digits; r shows guidance; book reads the case; book full shows the audit; q quits.")
             continue
         try:
             guess = validate_guess_digits(raw, lang)
@@ -549,8 +618,10 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         print(event["narrative"])
         if feedback == (4, 0):
             print("\n案件告破。" if lang == "zh" else "\nCase solved.")
-            print(session.read_story())
+            print(session.story.render_audit())
             return True
+        print(session.read_story())
+        print_adventure_situation(session, lang)
 
 
 def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_steps: int = 10) -> bool:
@@ -571,26 +642,30 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
     print("\n[推演模式]" if lang == "zh" else "\n[Simulation mode]")
     print("答案已锁定，由引擎负责推进调查。" if lang == "zh" else "The answer is locked; the engine will lead the investigation.")
     for _ in range(max_steps):
-        event = session.simulation_step()
+        result = solver.choose(session.history, top_k=3)
+        options = result.get("recommendations", [])[:3]
+        if not options:
+            break
+        selected = options[0]
+        if len(options) > 1 and random.random() < 0.35:
+            selected = random.choice(options[1:])
+        if lang == "zh":
+            considered = "、".join(str(item.get("guess")) for item in options)
+            print(f"\n侦探研判：考虑 {considered} 几种方案，选择 {selected['guess']}。")
+        else:
+            considered = ", ".join(str(item.get("guess")) for item in options)
+            print(f"\nDetective reasoning: considering {considered}; choosing {selected['guess']}.")
+        event = session.apply_turn(selected["guess"], solver.feedback(answer, selected["guess"]), source="QuestLine")
         guess = event["action"]["guess"]
         feedback = questline.parse_feedback(event["action"]["feedback"])
         print(f"\n第 {session.round} 轮：引擎选择 {guess}，反馈 {fb_text(feedback)}" if lang == "zh" else f"\nRound {session.round}: engine chose {guess}, feedback {fb_text(feedback)}")
         print(event["narrative"])
         if feedback == (4, 0):
-            print(session.read_story())
-            return True
-        try:
-            command = input("回车继续，story 查看故事，q 退出: ").strip().lower()
-        except EOFError:
-            return False
-        if command in {"q", "quit", "exit"}:
-            return False
-        if command in {"story", "book"}:
-            print(session.read_story())
-        elif command in {"book full", "book+", "audit"}:
             print(session.story.render_audit())
+            return True
+        print(session.read_story())
     print("达到探索步数上限。" if lang == "zh" else "Exploration step limit reached.")
-    print(session.read_story())
+    print(session.story.render_audit())
     return False
 
 
@@ -1056,6 +1131,22 @@ def choose_language(default: str = "zh") -> str:
     return default
 
 
+def choose_mode(lang: str) -> str:
+    if lang == "zh":
+        print("选择模式 / Choose mode:")
+        print("  1. 协查模式：你输入反馈，引擎负责分析")
+        print("  2. 推演模式：你提供答案，引擎自动推进")
+        print("  3. 冒险模式：系统隐藏答案，你负责破案")
+        raw = input("> ").strip().lower()
+        return {"2": "simulation", "3": "adventure", "simulation": "simulation", "adventure": "adventure"}.get(raw, "assist")
+    print("Choose mode:")
+    print("  1. Assist: you provide feedback, engine analyzes")
+    print("  2. Simulation: you provide the answer, engine plays")
+    print("  3. Adventure: hidden answer, you investigate")
+    raw = input("> ").strip().lower()
+    return {"2": "simulation", "3": "adventure", "simulation": "simulation", "adventure": "adventure"}.get(raw, "assist")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="QuestLine interactive CLI v1.3")
     parser.add_argument("--lang", choices=["zh", "en"], default=None)
@@ -1063,7 +1154,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument(
         "--mode",
         choices=["assist", "simulation", "adventure", "solver", "explore", "story"],
-        default="assist",
+        default=None,
     )
     parser.add_argument("--answer", help="hidden answer for story/explore mode")
     parser.add_argument("--max-steps", type=int, default=10)
@@ -1071,11 +1162,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     lang = args.lang or choose_language("zh")
     print_welcome(lang)
     solver = questline.QuestLineSolver(verbose=True)
+    selected_mode = args.mode or choose_mode(lang)
     mode = {
         "solver": "assist",
         "explore": "simulation",
         "story": "adventure",
-    }.get(args.mode, args.mode)
+    }.get(selected_mode, selected_mode)
     if mode == "adventure":
         story_game_loop(lang, solver, answer=args.answer)
         print(tr(lang, "bye"))
