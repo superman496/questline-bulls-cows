@@ -466,13 +466,13 @@ def recommendation_reason(item: Dict[str, Any], lang: str = "zh") -> str:
     if lang != "zh":
         return reason
     return {
-        "fixed first guess": "建立基础事实",
-        "opening book: stable AVG second move": "引入 45 组，建立共同参照",
-        "introduces untested groups": "引入尚未调查的小组",
+        "fixed first guess": "建立第一层参照",
+        "opening book: stable AVG second move": "扩大调查范围，建立共同参照",
+        "introduces untested groups": "寻找尚未验证的线索",
         "reuses tested digits in new positions": "复用已知数字，施加位置压力",
         "tests a remaining candidate directly": "直接验证残局候选",
         "tests a remaining candidate": "测试仍在候选空间中的答案",
-        "primarily separates feedback buckets": "拆分当前候选世界",
+        "primarily separates feedback buckets": "区分当前答案范围",
         "perfect endgame split": "最大化区分残局候选",
     }.get(reason, reason)
 
@@ -556,7 +556,7 @@ def print_adventure_guidance(session: questline.GameSession, solver: Any, lang: 
         "resolve_endgame": "验证残局排列",
     }
     task = investigation.get("task", "")
-    print(f"当前剩余可能世界：{len(candidates)}" if lang == "zh" else f"Remaining worlds: {len(candidates)}")
+    print(f"当前答案范围：{len(candidates)} 个可能答案" if lang == "zh" else f"Current answer range: {len(candidates)} possible answers")
     print(f"当前调查任务：{task_labels.get(task, task)}" if lang == "zh" else f"Investigation task: {task}")
     print(f"已调查组：{', '.join(investigation.get('tested_groups', [])) or '无'}；待调查组：{', '.join(investigation.get('untested_groups', [])) or '无'}" if lang == "zh" else f"Tested groups: {', '.join(investigation.get('tested_groups', [])) or 'none'}; untested groups: {', '.join(investigation.get('untested_groups', [])) or 'none'}")
     recommendations = result.get("recommendations", [])[:3]
@@ -596,11 +596,11 @@ def print_adventure_situation(session: questline.GameSession, lang: str) -> None
         "resolve_endgame": "验证残局排列",
     }
     if lang == "zh":
-        print(f"局势判断：剩余 {state['candidate_count']} 个可能世界；当前任务是{task_labels.get(investigation.get('task'), investigation.get('task', '继续调查'))}。")
+        print(f"局势判断：当前答案范围还有 {state['candidate_count']} 个可能答案；当前任务是{task_labels.get(investigation.get('task'), investigation.get('task', '继续调查'))}。")
         print(f"已调查组：{', '.join(investigation.get('tested_groups', [])) or '无'}；待调查组：{', '.join(investigation.get('untested_groups', [])) or '无'}。")
         print("线索提示：可以输入 r 请求分析建议，但当前案件不会直接替你选择猜法。")
     else:
-        print(f"Situation: {state['candidate_count']} worlds remain; task: {investigation.get('task', 'continue investigating')}.")
+        print(f"Situation: {state['candidate_count']} possible answers remain; task: {investigation.get('task', 'continue investigating')}.")
         print(f"Tested groups: {', '.join(investigation.get('tested_groups', [])) or 'none'}; untested groups: {', '.join(investigation.get('untested_groups', [])) or 'none'}.")
         print("Hint: use r for analysis; Adventure does not choose a guess for you automatically.")
 
@@ -838,11 +838,16 @@ def print_menu(menu: List[Dict[str, Any]], lang: str, round_number: int) -> None
         guess = item.get("guess", "????")
         exp = item.get("normal_expected")
         action = item.get("action", {})
-        action_label = action.get("type", "") if isinstance(action, dict) else ""
+        action_label = {
+            "group_probe": "调查新线索",
+            "position_probe": "施加位置压力",
+            "candidate_probe": "验证残局答案",
+            "mechanical_split": "区分答案范围",
+        }.get(action.get("type", "") if isinstance(action, dict) else "", "")
         if isinstance(exp, (int, float)) and exp:
-            print(f"  {i}. {guess}  [{src}]  action={action_label} AVG={exp:.2f} max={item.get('normal_max_bucket')}")
+            print(f"  {i}. {guess}  [{src}]  {action_label} AVG={exp:.2f} max={item.get('normal_max_bucket')}")
         else:
-            print(f"  {i}. {guess}  [{src}]  action={action_label}")
+            print(f"  {i}. {guess}  [{src}]  {action_label}")
 
 
 def print_turn(solver: Any, history: History, result: Dict[str, Any], menu: List[Dict[str, Any]], lang: str) -> None:
@@ -920,19 +925,19 @@ def print_report(solver: Any, history: History, lang: str, state: CliState, reve
     world = solver.world_line_analysis(history)
     if world.get("main_world"):
         main = world["main_world"]
-        title = "世界线分析" if lang == "zh" else "World-line analysis"
-        main_label = "主世界" if lang == "zh" else "Main world"
+        title = "答案结构分析" if lang == "zh" else "Answer structure analysis"
+        main_label = "主导结构" if lang == "zh" else "Leading structure"
         groups = "+".join(main["groups"])
         print(f"\n[{title}]")
         print(f"{main_label}: {groups}  support={main['support']:.1%} ({main['count']}/{world['candidate_count']})")
         confidence = main.get("confidence")
         if lang == "zh":
             if confidence == "tied":
-                explanation = f"解释: {groups} 当前与另外 {main['tied_world_count'] - 1} 条世界线并列，暂不算唯一主线。"
+                explanation = f"解释: {groups} 当前与另外 {main['tied_world_count'] - 1} 种结构并列，暂不能视为主导解释。"
             elif confidence == "weak":
-                explanation = f"解释: {groups} 仅弱领先第二世界线 {main['lead_over_runner_up']:.1%}，需要继续观察。"
+                explanation = f"解释: {groups} 仅略领先下一种结构 {main['lead_over_runner_up']:.1%}，需要继续观察。"
             else:
-                explanation = f"解释: 主世界由 {groups} 组成，比第二世界线高 {main['lead_over_runner_up']:.1%}。"
+                explanation = f"解释: {groups} 目前最能解释已有反馈，比下一种结构高 {main['lead_over_runner_up']:.1%}。"
             print(explanation)
         else:
             if confidence == "tied":
@@ -941,7 +946,7 @@ def print_report(solver: Any, history: History, lang: str, state: CliState, reve
                 print(f"Why: {groups} weakly leads the next world by {main['lead_over_runner_up']:.1%}; keep observing.")
             else:
                 print(f"Why: {groups} clearly leads the next world by {main['lead_over_runner_up']:.1%}.")
-        for key, label in (("top_pairs", "Top 2-digit groups"), ("top_triples", "Top 3-digit groups"), ("top_quads", "Top 4-digit candidates")):
+        for key, label in (("top_pairs", "强势二数字组合"), ("top_triples", "强势三数字组合"), ("top_quads", "靠前答案结构")):
             entries = world[key]
             if entries:
                 rendered = ", ".join(f"{entry['pattern']} ({entry['support']:.1%})" for entry in entries[:3])
