@@ -118,6 +118,28 @@ The narrative has four scales:
 3. **World line** — a complete explanation gains or loses support.
 4. **Chapter** — the investigation task changes its question.
 
+### QuestLine narrative vocabulary
+
+The engine may use player shorthand such as “good”, “bad”, or “double bad”
+when discussing a position informally, but formal QuestLine output uses
+investigation language:
+
+| Informal idea | Formal narrative wording |
+|---|---|
+| A digit is still in the candidate set | candidate retained in the explanation space |
+| A digit is trusted | enters a credible explanation |
+| A digit is doubted | support for its explanation weakens |
+| A digit is eliminated | removed from the explanation space |
+| Both digits in a pair are bad | the pair's common explanation is collectively excluded |
+| One of a pair is good | group evidence differentiates internally; one member remains supported |
+| The answer is found logically | one explanation remains |
+| The answer is checked | feedback confirms the explanation |
+
+This distinction is essential: candidate existence is not identity trust. A
+digit can remain in many candidate worlds without ever becoming part of a
+credible explanation. Each digit should therefore have a character timeline,
+while each group should have a separate relationship timeline.
+
 ## 6. Three product modes
 
 All modes should eventually share `GameSession`; only the actor and feedback

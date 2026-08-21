@@ -417,25 +417,33 @@ class _QuestLineCore:
 
     @staticmethod
     def _changed_digit_facts(before: Dict[str, object], after: Dict[str, object]) -> Dict[str, List[str]]:
-        changes = {"confirmed": [], "likely": [], "excluded": [], "weakened": [], "strengthened": []}
+        changes = {
+            "confirmed": [], "likely": [], "excluded": [], "weakened": [], "strengthened": [],
+            "support_risen": [], "support_fallen": [],
+        }
         before_status = before.get("digit_status", {})
         after_status = after.get("digit_status", {})
+        before_support = before.get("digit_support", {})
+        after_support = after.get("digit_support", {})
         rank = {"excluded": 0, "possible": 1, "likely": 2, "confirmed": 3}
         for digit in DIGITS:
             old = before_status.get(digit, {}).get("status", "possible")
             new = after_status.get(digit, {}).get("status", "possible")
-            if old == new:
-                continue
-            if new == "confirmed":
+            delta = after_support.get(digit, 0.0) - before_support.get(digit, 0.0)
+            if new == "confirmed" and old != "confirmed":
                 changes["confirmed"].append(digit)
-            elif new == "likely":
+            elif new == "likely" and old != "likely":
                 changes["likely"].append(digit)
-            elif new == "excluded":
+            elif new == "excluded" and old != "excluded":
                 changes["excluded"].append(digit)
             if rank.get(new, 1) > rank.get(old, 1):
                 changes["strengthened"].append(digit)
-            else:
+            elif rank.get(new, 1) < rank.get(old, 1):
                 changes["weakened"].append(digit)
+            if delta >= 0.10:
+                changes["support_risen"].append(digit)
+            elif delta <= -0.10:
+                changes["support_fallen"].append(digit)
         return changes
 
     @staticmethod
@@ -523,8 +531,24 @@ class _QuestLineCore:
             "title": title,
             "action": {"guess": guess, "feedback": fb_to_str(feedback), "classification": action},
             "decision": {"task": old_task, "rationale": rationale},
-            "before": {"candidate_count": before.get("candidate_count"), "task": old_task, "main_world": old_main},
-            "after": {"candidate_count": after.get("candidate_count"), "task": new_task, "main_world": new_main},
+            "before": {
+                "candidate_count": before.get("candidate_count"),
+                "task": old_task,
+                "main_world": old_main,
+                "digit_support": before.get("digit_support", {}),
+                "digit_status": before.get("digit_status", {}),
+                "group_states": before.get("group_states", {}),
+                "group_relations": before.get("group_relations", {}),
+            },
+            "after": {
+                "candidate_count": after.get("candidate_count"),
+                "task": new_task,
+                "main_world": new_main,
+                "digit_support": after.get("digit_support", {}),
+                "digit_status": after.get("digit_status", {}),
+                "group_states": after.get("group_states", {}),
+                "group_relations": after.get("group_relations", {}),
+            },
             "facts": digit_changes,
             "position_facts": position_changes,
             "group_changes": group_changes,
@@ -547,7 +571,7 @@ class _QuestLineCore:
         if task == "establish_foundation":
             return "先建立基础数字关系，给后续组间比较提供共同参照。"
         if task == "introduce_45":
-            return "01 与 23 已有第一层证据，现在引入 45，观察好人主干是否延伸。"
+            return "01 与 23 已有第一层证据，现在引入 45，观察可信主线是否延伸。"
         if task in {"investigate_outer_groups", "cross_test_new_group"}:
             return f"当前重点是引入未调查信息，行动选择测试 {groups}，同时保持基本 AVG/MM 效率。"
         if task == "converge_outer_choice":
@@ -569,8 +593,18 @@ class _QuestLineCore:
             parts.append(f"数字 {''.join(changes['confirmed'])} 在剩余世界中已基本确认。")
         if changes["excluded"]:
             parts.append(f"数字 {''.join(changes['excluded'])} 被当前证据排除。")
+            exposed = [
+                digit for digit in changes["excluded"]
+                if before.get("digit_status", {}).get(digit, {}).get("status") in {"likely", "confirmed"}
+            ]
+            if exposed:
+                parts.append(f"数字 {''.join(exposed)} 此前曾进入可信解释，本轮伪装破裂。")
         if changes["weakened"]:
             parts.append(f"数字 {''.join(changes['weakened'])} 的支持度下降。")
+        if changes.get("support_risen"):
+            parts.append(f"数字 {''.join(changes['support_risen'])} 在候选世界中的支持上升，但这还不等于身份确认。")
+        if changes.get("support_fallen"):
+            parts.append(f"数字 {''.join(changes['support_fallen'])} 在候选世界中的支持下降。")
         strengthened_positions = position_changes["strengthened"] + position_changes["confirmed"]
         weakened_positions = position_changes["weakened"] + position_changes["excluded"]
         if strengthened_positions:
@@ -579,6 +613,54 @@ class _QuestLineCore:
         if weakened_positions:
             details = "、".join(f"{item['digit']}×第{item['position'] + 1}位" for item in weakened_positions[:3])
             parts.append(f"位置解释被削弱：{details}。")
+        if after.get("group_relations"):
+            group_events = []
+            for group in GROUP_ORDER:
+                before_relation = before.get("group_relations", {}).get(group, {}).get("relation")
+                after_relation = after.get("group_relations", {}).get(group, {}).get("relation")
+                if before_relation != after_relation:
+                    group_events.append(f"{group}:{before_relation}→{after_relation}")
+            if group_events:
+                parts.append(f"小组关系变化：{'、'.join(group_events[:3])}。")
+        group_status_events = []
+        for group in GROUP_ORDER:
+            before_status = before.get("group_states", {}).get(group, {}).get("status")
+            after_status = after.get("group_states", {}).get(group, {}).get("status")
+            if before_status == after_status:
+                continue
+            if after_status == "excluded":
+                group_status_events.append(f"{group} 的共同解释被证据整体排除")
+            elif after_status == "full":
+                group_status_events.append(f"{group} 的共同解释获得完整支持")
+            elif after_status == "present" and before_status in {"unobserved", "unresolved", "contested"}:
+                group_status_events.append(f"{group} 整体重新进入可信解释")
+        if group_status_events:
+            parts.append(f"组级判断：{'；'.join(group_status_events)}。")
+        split_groups = []
+        for group in GROUP_ORDER:
+            relation = after.get("group_relations", {}).get(group, {}).get("relation")
+            if relation == "one_strong_one_weak":
+                split_groups.append(group)
+        if split_groups:
+            split_details = []
+            for group in split_groups:
+                support = after.get("group_relations", {}).get(group, {}).get("support", {})
+                if support:
+                    strong = max(support, key=support.get)
+                    weak = min(support, key=support.get)
+                    split_details.append(f"{group} 内部暂偏向 {strong}，{weak} 仍待排除")
+                else:
+                    split_details.append(group)
+            parts.append(f"组内证据分化：{'；'.join(split_details)}。")
+        for group in GROUP_ORDER:
+            relation = after.get("group_relations", {}).get(group, {}).get("relation")
+            if relation != "one_strong_one_weak":
+                continue
+            support = after.get("group_relations", {}).get(group, {}).get("support", {})
+            strong = max(support, key=support.get)
+            weak = min(support, key=support.get)
+            if support.get(strong, 0.0) >= 0.98:
+                parts.append(f"组 {group} 的证据已经完成拆分：{strong} 被保留，{weak} 被排除。")
         if after.get("candidate_count") != before.get("candidate_count"):
             parts.append(f"结果空间从 {before.get('candidate_count')} 缩小到 {after.get('candidate_count')}。")
         if old_task != new_task:
@@ -808,6 +890,13 @@ class _QuestLineReasoningLayer(_QuestLineCore):
 class StoryBook(_QuestLineReasoningLayer):
     """Public story organizer built on the solver's explanation layer."""
 
+    STATUS_TITLES = {
+        "excluded": "从解释空间移除",
+        "possible": "候选保留",
+        "likely": "较强解释",
+        "confirmed": "身份锁定",
+    }
+
     def render(self, include_indexes: bool = False) -> str:
         """Render the investigation as a readable Chinese case book."""
         if not self.events:
@@ -818,6 +907,14 @@ class StoryBook(_QuestLineReasoningLayer):
             lines.extend(["", f"## {chapter['title']}"])
             for event_index in chapter["event_indexes"]:
                 lines.append(self.events[event_index]["narrative"])
+
+        arc = self.render_identity_arc()
+        if arc:
+            lines.extend(["", "## 身份认知轨迹", arc])
+
+        characters = self.render_character_stories()
+        if characters:
+            lines.extend(["", "## 数字角色档案", characters])
 
         final = self.events[-1]
         if final["type"] == "solution_revealed":
@@ -831,6 +928,114 @@ class StoryBook(_QuestLineReasoningLayer):
             lines.extend(["", "## 角色索引", self.render_digit_index()])
             lines.extend(["", "## 阵营索引", self.render_group_index()])
         return "\n".join(lines)
+
+    def render_identity_arc(self) -> str:
+        """Summarize how trust in each digit evolved across the case."""
+        if not self.events:
+            return ""
+        rows = []
+        for digit in DIGITS:
+            states = []
+            for event in self.events:
+                status = event.get("after", {}).get("digit_status", {}).get(digit, {}).get("status")
+                if status and (not states or states[-1] != status):
+                    states.append(status)
+            changes = [
+                event["round"] for event in self.events
+                if digit in event.get("facts", {}).get("support_risen", [])
+                or digit in event.get("facts", {}).get("support_fallen", [])
+                or digit in event.get("facts", {}).get("confirmed", [])
+                or digit in event.get("facts", {}).get("excluded", [])
+            ]
+            if len(states) > 1 or changes:
+                max_support = max(
+                    event.get("after", {}).get("digit_support", {}).get(digit, 0.0)
+                    for event in self.events
+                )
+                final_status = self.events[-1].get("after", {}).get("digit_status", {}).get(digit, {}).get("status")
+                if max_support < 0.75 and final_status == "excluded":
+                    interpretation = "曾被保留在候选空间，始终未进入可信解释"
+                elif final_status == "confirmed":
+                    interpretation = "最终进入可信解释"
+                else:
+                    interpretation = "身份仍需结合组关系判断"
+                rows.append(f"数字 {digit}：{' → '.join(states)}；{interpretation}；关键认知变化见第 {', '.join(map(str, changes))} 轮")
+        return "\n".join(rows)
+
+    def render_character_stories(self) -> str:
+        """Render a separate evidence story for every digit that changed."""
+        if not self.events:
+            return ""
+        rows = []
+        for digit in DIGITS:
+            entries = []
+            previous_status = "possible"
+            previous_support = None
+            for event in self.events:
+                before = event.get("before", {})
+                after = event.get("after", {})
+                if previous_support is None:
+                    previous_status = before.get("digit_status", {}).get(digit, {}).get("status", "possible")
+                    previous_support = before.get("digit_support", {}).get(digit, 0.0)
+                status = after.get("digit_status", {}).get(digit, {}).get("status", "possible")
+                support = after.get("digit_support", {}).get(digit, 0.0)
+                delta = support - previous_support
+                facts = event.get("facts", {})
+                if status != previous_status:
+                    entries.append(
+                        f"第{event['round']}轮，证据地位由“{self.STATUS_TITLES.get(previous_status, previous_status)}”"
+                        f"转为“{self.STATUS_TITLES.get(status, status)}”。"
+                    )
+                elif digit in facts.get("support_risen", []):
+                    entries.append(f"第{event['round']}轮，其所在解释获得更多支撑，但尚未形成身份结论。")
+                elif digit in facts.get("support_fallen", []):
+                    entries.append(f"第{event['round']}轮，其所在解释的支撑减弱。")
+                if digit in facts.get("confirmed", []):
+                    entries.append(f"第{event['round']}轮，{digit} 的身份被锁定。")
+                for group in GROUP_ORDER:
+                    if digit not in group:
+                        continue
+                    partner = next(item for item in group if item != digit)
+                    before_group = before.get("group_states", {}).get(group, {}).get("status")
+                    after_group = after.get("group_states", {}).get(group, {}).get("status")
+                    if before_group != after_group and after_group == "excluded":
+                        entries.append(
+                            f"第{event['round']}轮，与数字 {partner} 共同构成的组级解释被整体排除；"
+                            f"{digit} 未因此获得身份信任。"
+                        )
+                    elif before_group != after_group and after_group == "full":
+                        entries.append(
+                            f"第{event['round']}轮，与数字 {partner} 共同构成的组级解释获得完整支持。"
+                        )
+                    relation = after.get("group_relations", {}).get(group, {}).get("relation")
+                    if relation == "one_strong_one_weak":
+                        group_support = after.get("group_relations", {}).get(group, {}).get("support", {})
+                        strong = max(group_support, key=group_support.get)
+                        weak = min(group_support, key=group_support.get)
+                        if digit == strong:
+                            entries.append(
+                                f"第{event['round']}轮，{group} 内部证据分化；{digit} 暂时成为较强解释，"
+                                f"但仍需等待对数字 {weak} 的排除。"
+                            )
+                        elif digit == weak:
+                            entries.append(
+                                f"第{event['round']}轮，{group} 内部证据分化；{digit} 的解释被置于较弱位置，"
+                                f"尚未完成排除。"
+                            )
+                previous_status = status
+                previous_support = support
+            if entries:
+                final_status = self.events[-1].get("after", {}).get("digit_status", {}).get(digit, {}).get("status")
+                max_support = max(
+                    event.get("after", {}).get("digit_support", {}).get(digit, 0.0)
+                    for event in self.events
+                )
+                if final_status == "excluded" and max_support < 0.75:
+                    entries.append("结案判断：它始终只是候选空间中的影子，从未进入可信解释，也没有成为可信身份。")
+                elif final_status == "confirmed":
+                    entries.append("结案判断：它最终成为当前答案解释中不可替代的一员。")
+                rows.append(f"数字 {digit}\n" + " ".join(entries))
+        return "\n".join(rows)
 
     def render_digit_index(self) -> str:
         """Render the rounds in which each digit's evidence changed."""
@@ -1273,6 +1478,133 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 break
         return rows
 
+
+class GameSession:
+    """Shared product state for Assist, Simulation, and Adventure modes."""
+
+    MODES = {"assist", "simulation", "adventure"}
+    ACTIVE = "active"
+    LOGICALLY_SOLVED = "logically_solved"
+    SOLVED = "solved"
+    INCONSISTENT = "inconsistent"
+
+    def __init__(self, mode: str = "assist", solver: Optional[QuestLineSolver] = None, answer: Optional[Code] = None) -> None:
+        if mode not in self.MODES:
+            raise ValueError(f"Unknown GameSession mode: {mode}")
+        if mode in {"simulation", "adventure"} and answer is None:
+            raise ValueError(f"{mode.capitalize()} mode requires an answer.")
+        self.mode = mode
+        self.solver = solver or QuestLineSolver()
+        self.answer = validate_code(answer) if answer is not None else None
+        self.history: List[Tuple[Code, Feedback]] = []
+        self.story = StoryBook(solver=self.solver)
+        self.status = self.ACTIVE
+        self.logical_answer: Optional[Code] = None
+        self.last_event: Optional[Dict[str, object]] = None
+
+    @property
+    def round(self) -> int:
+        return len(self.history)
+
+    def state(self) -> Dict[str, object]:
+        candidates = self.solver.filter_candidates(self.history)
+        investigation = self.solver.investigation_state(self.history)
+        if len(candidates) == 1:
+            self.logical_answer = ALL_CODES[candidates[0]]
+            if self.status == self.ACTIVE:
+                self.status = self.LOGICALLY_SOLVED
+        elif not candidates:
+            self.status = self.INCONSISTENT
+        return {
+            "mode": self.mode,
+            "status": self.status,
+            "round": self.round,
+            "candidate_count": len(candidates),
+            "logical_answer": self.logical_answer,
+            "answer_known": self.answer is not None,
+            "investigation": investigation,
+            "next_action": self.next_action(),
+        }
+
+    def next_action(self) -> Optional[Dict[str, object]]:
+        if self.status in {self.SOLVED, self.INCONSISTENT}:
+            return None
+        result = self.solver.choose(self.history, top_k=1)
+        recommendations = result.get("recommendations", [])
+        return recommendations[0] if recommendations else None
+
+    def apply_turn(self, guess: Code, feedback: Optional[Union[Feedback, str]] = None, source: str = "QuestLine") -> Dict[str, object]:
+        if self.status in {self.SOLVED, self.INCONSISTENT}:
+            raise ValueError(f"Session is not accepting turns: {self.status}")
+        guess = validate_code(guess)
+        if self.mode == "adventure":
+            if self.answer is None:
+                raise ValueError("Adventure mode requires a hidden answer.")
+            actual_feedback = self.solver.feedback(self.answer, guess)
+            if feedback is not None and validate_feedback(parse_feedback(feedback)) != actual_feedback:
+                raise ValueError("Adventure feedback does not match the hidden answer.")
+            parsed_feedback = actual_feedback
+        else:
+            if feedback is None:
+                raise ValueError("This mode requires feedback.")
+            parsed_feedback = validate_feedback(parse_feedback(feedback))
+        event = self.story.add_turn(self.history, guess, parsed_feedback)
+        trial = self.history + [(guess, parsed_feedback)]
+        if not self.solver.filter_candidates(trial):
+            self.status = self.INCONSISTENT
+        self.history.append((guess, parsed_feedback))
+        self.last_event = event
+        if parsed_feedback == (CODE_LEN, 0):
+            self.status = self.SOLVED
+        else:
+            self.state()
+        event["session"] = {"mode": self.mode, "status": self.status, "round": self.round, "source": source}
+        return event
+
+    def simulation_step(self) -> Dict[str, object]:
+        if self.mode != "simulation":
+            raise ValueError("simulation_step is only available in Simulation mode.")
+        action = self.next_action()
+        if not action:
+            raise ValueError("No action is available.")
+        guess = action["guess"]
+        assert self.answer is not None
+        return self.apply_turn(guess, self.solver.feedback(self.answer, guess), source="QuestLine")
+
+    def read_story(self, include_indexes: bool = False) -> str:
+        return self.story.render(include_indexes=include_indexes)
+
+    def current_state(self) -> Dict[str, object]:
+        """Structured read API for clients such as a future WebUI."""
+        return self.state()
+
+    def timeline(self) -> List[Dict[str, object]]:
+        return list(self.story.events)
+
+    def save(self, include_answer: bool = False) -> Dict[str, object]:
+        """Return a JSON-safe session snapshot suitable for save/resume."""
+        return self.to_dict(include_answer=include_answer)
+
+    @classmethod
+    def resume(cls, snapshot: Dict[str, object], solver: Optional[QuestLineSolver] = None) -> "GameSession":
+        """Resume a session from a snapshot without trusting rendered text."""
+        mode = str(snapshot.get("mode", "assist"))
+        answer = snapshot.get("answer")
+        if mode in {"simulation", "adventure"} and answer is None:
+            raise ValueError("A hidden answer is required to resume this mode.")
+        session = cls(mode=mode, solver=solver, answer=answer)
+        for row in snapshot.get("history", []):
+            guess, feedback = row
+            session.apply_turn(str(guess), str(feedback))
+        return session
+
+    def to_dict(self, include_answer: bool = False) -> Dict[str, object]:
+        data = self.state()
+        data["history"] = [(guess, fb_to_str(feedback)) for guess, feedback in self.history]
+        data["story"] = self.story.to_dict()
+        if include_answer and self.answer is not None:
+            data["answer"] = self.answer
+        return data
 
 
 _DEFAULT_SOLVER: Optional[QuestLineSolver] = None
