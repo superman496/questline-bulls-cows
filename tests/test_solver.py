@@ -5,7 +5,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from questline import QuestLineSolver, StoryBook, fb_to_str, parse_feedback
+from questline import GameSession, QuestLineSolver, StoryBook, fb_to_str, parse_feedback
 
 
 def test_parse_feedback():
@@ -311,3 +311,75 @@ def test_story_book_renders_case_and_indexes():
     assert "## 角色索引" in rendered
     assert "数字 6" in rendered
     assert "案件结论" in rendered
+
+
+def test_story_book_preserves_identity_turning_points():
+    solver = QuestLineSolver(use_cache=True)
+    book = StoryBook.from_history([
+        ("0123", "0b1c"),
+        ("1045", "0b2c"),
+        ("6470", "1b1c"),
+        ("9680", "0b0c"),
+        ("5274", "0b3c"),
+    ], solver=solver)
+    rendered = book.render()
+    assert "伪装破裂" in rendered
+    assert "组内证据分化" in rendered
+    assert "01 的共同解释被证据整体排除" in rendered
+    assert "89 的共同解释被证据整体排除" in rendered
+    assert "数字 1" in rendered and "从未成为可信身份" in rendered
+    assert "身份认知轨迹" in rendered
+    assert "数字 3" in rendered
+
+
+def test_game_session_assist_uses_shared_transition_pipeline():
+    session = GameSession(mode="assist", solver=QuestLineSolver(use_cache=False))
+    event = session.apply_turn("0123", "0b1c", source="Manual")
+    assert session.round == 1
+    assert session.status == session.ACTIVE
+    assert event["session"]["mode"] == "assist"
+    assert event["session"]["source"] == "Manual"
+    assert session.story.events[0] is event
+    snapshot = session.to_dict()
+    assert snapshot["history"] == [("0123", "0b1c")]
+    assert snapshot["story"]["event_count"] == 1
+    assert snapshot["answer_known"] is False
+
+
+def test_game_session_simulation_steps_engine_action():
+    session = GameSession(
+        mode="simulation",
+        answer="3457",
+        solver=QuestLineSolver(use_cache=True),
+    )
+    event = session.simulation_step()
+    assert event["action"]["guess"] == "0123"
+    assert session.history[0] == ("0123", (0, 1))
+    assert session.status == session.ACTIVE
+    assert session.to_dict(include_answer=True)["answer"] == "3457"
+
+
+def test_game_session_adventure_generates_truthful_feedback():
+    session = GameSession(
+        mode="adventure",
+        answer="3457",
+        solver=QuestLineSolver(use_cache=False),
+    )
+    event = session.apply_turn("0123")
+    assert event["action"]["feedback"] == "0b1c"
+    assert session.history == [("0123", (0, 1))]
+
+
+def test_game_session_reaches_logical_solved_state():
+    session = GameSession(mode="assist", solver=QuestLineSolver(use_cache=True))
+    for guess, feedback in [
+        ("0123", "0b1c"),
+        ("1045", "0b2c"),
+        ("6470", "1b1c"),
+        ("9680", "0b0c"),
+        ("5274", "0b3c"),
+    ]:
+        session.apply_turn(guess, feedback)
+    assert session.status == session.LOGICALLY_SOLVED
+    assert session.logical_answer == "3457"
+    assert session.to_dict()["candidate_count"] == 1
