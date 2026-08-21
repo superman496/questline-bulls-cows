@@ -604,7 +604,15 @@ class _QuestLineCore:
             if after.get("digit_status", {}).get(digit, {}).get("status") == "excluded"
         ]
         if excluded_now and (changes["excluded"] or changes.get("confirmed")):
-            parts.append(f"截至本轮，数字 {_QuestLineReasoningLayer._format_digits(excluded_now)} 已从答案解释中排除；调查重点转向剩余数字的组合与顺序。")
+            confirmed_now = [
+                digit for digit in DIGITS
+                if after.get("digit_status", {}).get(digit, {}).get("status") == "confirmed"
+            ]
+            if len(confirmed_now) == CODE_LEN:
+                focus = "调查重点转向四个已确认数字的排列与顺序"
+            else:
+                focus = "调查重点转向剩余数字的身份与位置"
+            parts.append(f"截至本轮，数字 {_QuestLineReasoningLayer._format_digits(excluded_now)} 已从答案解释中排除；{focus}。")
         if changes["weakened"]:
             parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['weakened'])} 的支持度下降。")
         support_risen = [
@@ -615,8 +623,18 @@ class _QuestLineCore:
             parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(support_risen)} 在候选世界中的支持上升，但这还不等于身份确认。")
         if changes.get("support_fallen"):
             parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['support_fallen'])} 在候选世界中的支持下降。")
-        strengthened_positions = position_changes["strengthened"] + position_changes["confirmed"]
-        weakened_positions = position_changes["weakened"] + position_changes["excluded"]
+        active_digits = {
+            digit for digit in DIGITS
+            if after.get("digit_status", {}).get(digit, {}).get("status") != "excluded"
+        }
+        strengthened_positions = [
+            item for item in position_changes["strengthened"] + position_changes["confirmed"]
+            if item.get("digit") in active_digits
+        ]
+        weakened_positions = [
+            item for item in position_changes["weakened"] + position_changes["excluded"]
+            if item.get("digit") in active_digits
+        ]
         if strengthened_positions:
             details = "、".join(f"{item['digit']}→第{item['position'] + 1}位" for item in strengthened_positions[:3])
             parts.append(f"位置证据增强：{details}。")
@@ -625,7 +643,7 @@ class _QuestLineCore:
             parts.append(f"位置解释被削弱：{details}。")
         confirmed_position_facts = []
         excluded_position_facts = []
-        for digit in DIGITS:
+        for digit in active_digits:
             position_status = after.get("digit_status", {}).get(digit, {}).get("position_status", [])
             for position, status in enumerate(position_status):
                 if status == "confirmed":
@@ -763,6 +781,8 @@ class _QuestLineReasoningLayer(_QuestLineCore):
 
     def add_turn(self, history: History, guess: Code, feedback: Union[Feedback, str]) -> Dict[str, object]:
         event = dict(self.solver.explain_transition(history, guess, feedback))
+        event["deliberation"] = self._build_deliberation(history, guess, feedback, event)
+        event["audit_review"] = self._build_audit_review(history, guess, feedback, event)
         chapter_key, chapter_title = self._chapter_for(event)
         event["chapter"] = {"key": chapter_key, "title": chapter_title}
         event_index = len(self.events)
@@ -783,6 +803,135 @@ class _QuestLineReasoningLayer(_QuestLineCore):
             chapter["event_indexes"].append(event_index)
             chapter["narratives"].append(event["narrative"])
         return event
+
+    def _build_audit_review(self, history: History, guess: Code, feedback: Feedback, event: Dict[str, object]) -> Dict[str, object]:
+        """Score one move against pure AVG/MM benchmarks for the audit book."""
+        candidates = self.solver.filter_candidates(history)
+        after_candidates = self.solver.filter_candidates(list(history) + [(guess, feedback)])
+        if not candidates:
+            return {"before_count": 0, "after_count": len(after_candidates), "classification": "无可用候选"}
+        guess_index = CODE_TO_INDEX[guess]
+        avg_index, avg_exp, avg_max, avg_buckets = self.solver.best_pure_guess(candidates, "avg")
+        mm_index, mm_exp, mm_max, mm_buckets = self.solver.best_pure_guess(candidates, "mm")
+        actual_exp, actual_max, actual_buckets = self.solver.avg_remaining(candidates, guess_index)
+        reduction = 1 - (len(after_candidates) / len(candidates))
+        relative = actual_exp / avg_exp if avg_exp else 0.0
+        if guess_index == avg_index:
+            classification = "纯 AVG 最优"
+        elif guess_index == mm_index:
+            classification = "纯 MM 最优"
+        elif actual_exp <= avg_exp * 1.08 and actual_max <= avg_max + 1:
+            classification = "接近基准，兼顾调查结构"
+        elif reduction >= 0.75:
+            classification = "有效推进，但不是纯数学最优"
+        else:
+            classification = "信息收益有限，偏向叙事或位置试探"
+        return {
+            "before_count": len(candidates),
+            "after_count": len(after_candidates),
+            "reduction": reduction,
+            "actual": {"guess": guess, "expected": actual_exp, "max_bucket": actual_max, "buckets": actual_buckets},
+            "avg": {"guess": ALL_CODES[avg_index], "expected": avg_exp, "max_bucket": avg_max, "buckets": avg_buckets},
+            "mm": {"guess": ALL_CODES[mm_index], "expected": mm_exp, "max_bucket": mm_max, "buckets": mm_buckets},
+            "relative_to_avg": relative,
+            "classification": classification,
+        }
+
+    @staticmethod
+    def _audit_review_text(review: Dict[str, object], round_number: int) -> str:
+        if not review.get("actual"):
+            return f"### 第 {round_number} 轮行动复盘\n候选空间无效，无法进行数学基准比较。"
+        actual = review["actual"]
+        avg = review["avg"]
+        mm = review["mm"]
+        return "\n".join([
+            f"### 第 {round_number} 轮行动复盘：{actual['guess']}",
+            f"候选空间：{review['before_count']} → {review['after_count']}（缩减 {review['reduction']:.1%}）。",
+            f"本步表现：AVG 期望剩余 {actual['expected']:.2f}，最坏分桶 {actual['max_bucket']}，反馈分桶 {actual['buckets']} 个。",
+            f"AVG 基准：{avg['guess']} / 期望 {avg['expected']:.2f} / 最坏 {avg['max_bucket']} / {avg['buckets']} 桶。",
+            f"MM 基准：{mm['guess']} / 期望 {mm['expected']:.2f} / 最坏 {mm['max_bucket']} / {mm['buckets']} 桶。",
+            f"上帝视角判断：{review['classification']}。",
+        ])
+
+    def _build_deliberation(self, history: History, guess: Code, feedback: Feedback, event: Dict[str, object]) -> str:
+        """Build a data-backed closing statement for the readable book."""
+        after_history = list(history) + [(guess, feedback)]
+        after = event.get("after", {})
+        before = event.get("before", {})
+        facts = event.get("facts", {})
+        position_facts = event.get("position_facts", {})
+        recommendations = self.solver.choose(after_history, top_k=3).get("recommendations", [])[:3]
+        confirmed = [
+            digit for digit in DIGITS
+            if after.get("digit_status", {}).get(digit, {}).get("status") == "confirmed"
+        ]
+        excluded = [
+            digit for digit in DIGITS
+            if after.get("digit_status", {}).get(digit, {}).get("status") == "excluded"
+        ]
+        unresolved = [digit for digit in DIGITS if digit not in confirmed and digit not in excluded]
+        parts = [f"### 第 {event['round']} 轮总结陈词：{guess} -> {fb_to_str(feedback)}"]
+
+        if facts.get("confirmed") or facts.get("excluded"):
+            parts.append("本轮新增事实：")
+            if facts.get("confirmed"):
+                parts.append(f"- 保留：{self._format_digits(facts['confirmed'])}。")
+            if facts.get("excluded"):
+                direct = [digit for digit in facts["excluded"] if digit in guess]
+                inferred = [digit for digit in facts["excluded"] if digit not in direct]
+                if direct:
+                    parts.append(f"- 直接证据排除：{self._format_digits(direct)}。")
+                if inferred:
+                    parts.append(f"- 结果集归纳排除：{self._format_digits(inferred)}；它们不是被某一轮单独点名，而是在全局一致性检验后消失。")
+        else:
+            parts.append("本轮没有产生新的身份定论，主要影响落在候选世界的重新分层。")
+
+        if len(confirmed) == CODE_LEN:
+            parts.append(f"全局判断：{self._format_digits(confirmed)} 已组成唯一数字集合；身份调查结束，剩下的是位置排布。")
+        elif confirmed or excluded:
+            parts.append(f"全局判断：已确认 {self._format_digits(confirmed) or '无'}；已排除 {self._format_digits(excluded) or '无'}；仍在竞争 {self._format_digits(unresolved) or '无'}。当前不能把案件说成纯粹的排列问题。")
+        else:
+            parts.append("全局判断：身份仍然开放，下一轮应优先制造数字集合之间的区分，而不是过早锁定某条主线。")
+
+        active = [digit for digit in DIGITS if digit not in excluded]
+        position_lines = []
+        for digit in active:
+            supports = after.get("digit_status", {}).get(digit, {}).get("position_support", [])
+            if not supports:
+                continue
+            best = max(range(len(supports)), key=lambda index: supports[index])
+            worst = min(range(len(supports)), key=lambda index: supports[index])
+            if supports[best] >= 0.65:
+                position_lines.append(f"{digit} 更适合第{best + 1}位（{supports[best]:.0%}）")
+            elif supports[best] - supports[worst] >= 0.25:
+                position_lines.append(f"{digit} 暂偏向第{best + 1}位（{supports[best]:.0%}），不宜优先放在第{worst + 1}位（{supports[worst]:.0%}）")
+        if position_lines:
+            parts.append("位置盘面：" + "；".join(position_lines[:4]) + "。")
+        elif position_facts.get("strengthened") or position_facts.get("confirmed"):
+            parts.append("位置盘面：本轮出现位置变化，但还不足以形成稳定的排布建议。")
+        else:
+            parts.append("位置盘面：当前仍以身份判断为主，位置证据暂未形成可独立行动的锚点。")
+
+        if recommendations:
+            proposals = []
+            for item in recommendations:
+                action = item.get("action", {})
+                reason = item.get("reason") or action.get("reason") or action.get("type", "继续拆分")
+                reason = {
+                    "fixed first guess": "建立基础事实",
+                    "opening book: stable AVG second move": "引入 45 组，建立共同参照",
+                    "introduces untested groups": "引入尚未调查的小组",
+                    "reuses tested digits in new positions": "复用已知数字，施加位置压力",
+                    "tests a remaining candidate directly": "直接验证残局候选",
+                    "tests a remaining candidate": "测试仍在候选空间中的答案",
+                    "primarily separates feedback buckets": "拆分当前候选世界",
+                    "perfect endgame split": "最大化区分残局候选",
+                }.get(reason, reason)
+                proposals.append(f"{item.get('guess')}（{reason}）")
+            parts.append("下一轮组队建议：" + "；".join(proposals) + "。这些方案来自当前候选集的同一轮评分，分别代表不同的拆分取向；请玩家决定采用哪一队。")
+        else:
+            parts.append("下一轮组队建议：当前没有可行方案，需要先检查反馈是否互相矛盾。")
+        return "\n".join(parts)
 
     def _chapter_for(self, event: Dict[str, object]) -> Tuple[str, str]:
         if event["type"] == "solution_revealed":
@@ -934,7 +1083,18 @@ class StoryBook(_QuestLineReasoningLayer):
         for chapter in self.chapters:
             lines.extend(["", f"## {chapter['title']}"])
             for event_index in chapter["event_indexes"]:
-                lines.append(self.events[event_index]["narrative"])
+                event = self.events[event_index]
+                deliberation = event.get("deliberation")
+                if audit:
+                    review = event.get("audit_review")
+                    if review:
+                        lines.append(self._audit_review_text(review, event["round"]))
+                    if deliberation:
+                        lines.extend(["", deliberation])
+                elif deliberation:
+                    lines.append(deliberation)
+                else:
+                    lines.append(event["narrative"])
 
         final = self.events[-1]
         if final["type"] == "solution_revealed":
@@ -950,15 +1110,7 @@ class StoryBook(_QuestLineReasoningLayer):
         if facts:
             lines.extend(["", "## 当前已知事实", facts])
 
-        if audit:
-            arc = self.render_identity_arc()
-            if arc:
-                lines.extend(["", "## 身份认知轨迹", arc])
-            characters = self.render_character_stories()
-            if characters:
-                lines.extend(["", "## 数字角色档案", characters])
-
-        if audit or include_indexes:
+        if include_indexes and not audit:
             lines.extend(["", "## 角色索引", self.render_digit_index()])
             lines.extend(["", "## 阵营索引", self.render_group_index()])
         return "\n".join(lines)
@@ -975,6 +1127,8 @@ class StoryBook(_QuestLineReasoningLayer):
         confirmed_positions = []
         excluded_positions = []
         for digit in DIGITS:
+            if status_map.get(digit, {}).get("status") == "excluded":
+                continue
             for position, status in enumerate(status_map.get(digit, {}).get("position_status", [])):
                 if status == "confirmed":
                     confirmed_positions.append(f"{digit}→第{position + 1}位")
@@ -995,7 +1149,7 @@ class StoryBook(_QuestLineReasoningLayer):
         if len(confirmed) == CODE_LEN:
             lines.append("数字身份已经确定，当前重点是安排四个数字的正确顺序。")
         elif confirmed and excluded:
-            lines.append("调查重点：先保留已确认数字，再用位置证据安排它们的顺序。")
+            lines.append("调查重点：继续确定剩余数字的身份，并同步收集位置证据。")
         task = after.get("task")
         task_labels = {
             "establish_foundation": "建立基础事实",
