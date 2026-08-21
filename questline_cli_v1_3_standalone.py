@@ -449,6 +449,18 @@ def print_history(history: History, lang: str) -> None:
         print(f"  {i}. {g} -> {fb_text(fb)}")
 
 
+def print_session_history(history: History, lang: str) -> None:
+    """Show the complete board-like turn record for story-led modes."""
+    if not history:
+        return
+    title = "调查记录" if lang == "zh" else "Investigation board"
+    print(f"\n[{title}]")
+    print("  轮次  猜测  Bulls  Cows" if lang == "zh" else "  Round  Guess  Bulls  Cows")
+    for index, (guess, feedback) in enumerate(history, 1):
+        bulls, cows = feedback
+        print(f"  {index:>2}    {guess}     {bulls}      {cows}")
+
+
 def print_story(history: History, solver: Any, lang: str, audit: bool = False) -> None:
     """Print the readable book, or the complete audit book when requested."""
     book = questline.StoryBook.from_history(history, solver=solver)
@@ -599,7 +611,7 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
             print(session.story.render_audit())
             continue
         if low in {"r", "report"}:
-            print_adventure_guidance(session, solver, lang)
+            print_report(solver, session.history, lang, CliState(), reveal_logic=False, include_candidates=False)
             continue
         if low in {"h", "help", "?"}:
             print("输入 4 位不重复数字；r 查看当前调查建议；book 查看案件主线；book full 查看完整审计；q 退出。" if lang == "zh" else "Enter four distinct digits; r shows guidance; book reads the case; book full shows the audit; q quits.")
@@ -615,6 +627,7 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         feedback = story_feedback(hidden_answer, guess)
         event = session.apply_turn(guess, feedback, source="Manual")
         print(f"反馈 / Feedback: {fb_text(feedback)}")
+        print_session_history(session.history, lang)
         print(event["narrative"])
         if feedback == (4, 0):
             print("\n案件告破。" if lang == "zh" else "\nCase solved.")
@@ -625,7 +638,7 @@ def story_game_loop(lang: str, solver: Any, answer: Optional[str] = None, rng: O
         print_adventure_situation(session, lang)
 
 
-def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_steps: int = 10) -> bool:
+def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_steps: int = 10, rng: Optional[random.Random] = None) -> bool:
     """Run an engine-led exploration against a user-supplied hidden answer."""
     if answer is None:
         while True:
@@ -653,11 +666,11 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
             for index, item in enumerate(options, 1):
                 reason = item.get("reason") or item.get("action", {}).get("reason") or "推进当前调查"
                 print(f"  {index}. {item.get('guess')}：{reason}")
-            print("输入 y/0 让侦探决定，或输入 1-6 选择方案；也可输入 book 查看累计案情。")
+            print("直接回车让侦探随机决定，或输入 1-6 选择方案；也可输入 book 查看累计案情。")
         else:
             considered = ", ".join(str(item.get("guess")) for item in options)
             print(f"\nDetective reasoning: considering {considered}.")
-            print("Enter y/0 for the detective's choice, 1-6 to choose a plan, or book for the cumulative case.")
+            print("Press Enter for a random detective choice, enter 1-6 to choose a plan, or book for the cumulative case.")
         while True:
             try:
                 choice = input("> ").strip().lower()
@@ -670,15 +683,16 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
                 print(session.story.render_audit())
                 continue
             if choice in {"r", "report"}:
-                print_adventure_guidance(session, solver, lang)
+                print_report(solver, session.history, lang, CliState(), reveal_logic=False, include_candidates=False)
                 continue
-            if choice in {"y", "yes", "0", ""}:
-                selected = options[0]
+            if choice in {"y", "yes", ""}:
+                source = rng or random
+                selected = source.choice(options)
                 break
             if choice.isdigit() and 1 <= int(choice) <= len(options):
                 selected = options[int(choice) - 1]
                 break
-            print("请输入 y/0 或 1-6。" if lang == "zh" else "Enter y/0 or a plan number from 1-6.")
+            print(f"请直接回车随机选择，或输入 1-{len(options)}。" if lang == "zh" else f"Press Enter for a random choice, or enter a number from 1-{len(options)}.")
         if lang == "zh":
             print(f"侦探选择：{selected['guess']}。")
         else:
@@ -687,6 +701,7 @@ def explore_game_loop(lang: str, solver: Any, answer: Optional[str] = None, max_
         guess = event["action"]["guess"]
         feedback = questline.parse_feedback(event["action"]["feedback"])
         print(f"\n第 {session.round} 轮：引擎选择 {guess}，反馈 {fb_text(feedback)}" if lang == "zh" else f"\nRound {session.round}: engine chose {guess}, feedback {fb_text(feedback)}")
+        print_session_history(session.history, lang)
         print(event["narrative"])
         if feedback == (4, 0):
             print(session.story.render_audit())
@@ -823,7 +838,7 @@ def print_turn(solver: Any, history: History, result: Dict[str, Any], menu: List
     print_menu(menu, lang, round_number)
 
 
-def print_report(solver: Any, history: History, lang: str, state: CliState) -> None:
+def print_report(solver: Any, history: History, lang: str, state: CliState, reveal_logic: bool = True, include_candidates: bool = True) -> None:
     result = get_result(solver, history, lang, state, top_k=12)
     if result is None: return
     print(f"\n[{tr(lang, 'report_title')}]")
@@ -863,7 +878,7 @@ def print_report(solver: Any, history: History, lang: str, state: CliState) -> N
         action_summary = result.get("action_summary") or {}
         if action_summary:
             print(f"行动候选: {action_summary}" if lang == "zh" else f"Action candidates: {action_summary}")
-    ans = unique_answer(solver, history) if rem == 1 else None
+    ans = unique_answer(solver, history) if reveal_logic and rem == 1 else None
     if ans:
         print(tr(lang, "logic_solved", answer=ans))
     anchor = result.get("avg_anchor")
@@ -910,7 +925,7 @@ def print_report(solver: Any, history: History, lang: str, state: CliState) -> N
             label = "支持度变化" if lang == "zh" else "Support over time"
             print(f"{label}: {timeline}")
     candidates = result.get("candidates") or []
-    if candidates and len(candidates) <= 20:
+    if include_candidates and candidates and len(candidates) <= 20:
         print(f"\n{tr(lang, 'candidates')}")
         for code in candidates: print(f"  {code}")
 
