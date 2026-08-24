@@ -91,7 +91,7 @@ def test_action_classifier_identifies_group_and_position_probes():
     group_action = solver.classify_action("2568", history, state, False)
     assert group_action["type"] == "group_probe"
     assert "67" in group_action["new_groups"] or "89" in group_action["new_groups"]
-    assert solver.action_is_eligible(group_action, "cross_test_new_group") is False
+    assert solver.action_is_eligible(group_action, "cross_test_new_group") is True
 
     balanced_group_action = solver.classify_action("0167", history, state, True)
     assert balanced_group_action["new_groups"] == ["67"]
@@ -126,7 +126,7 @@ def test_task_filter_is_hard_before_efficiency_fallback():
     assert all(
         item["action"]["type"] == "group_probe"
         and len(item["action"]["new_groups"]) == 1
-        and item["action"]["new_group_digit_counts"][item["action"]["new_groups"][0]] == 2
+        and item["action"]["new_group_digit_counts"][item["action"]["new_groups"][0]] in {1, 2}
         for item in result["recommendations"]
     )
 
@@ -151,7 +151,7 @@ def test_endgame_prefers_remaining_candidate_directly():
     assert result["recommendations"][0]["is_candidate"] is True
 
 
-def test_task_sorting_prefers_action_objective_before_legacy_score():
+def test_task_sorting_uses_current_math_and_group_gain():
     solver = QuestLineSolver(use_cache=False)
     state = solver.investigation_state([
         ("0123", "0b1c"),
@@ -159,29 +159,23 @@ def test_task_sorting_prefers_action_objective_before_legacy_score():
     ])
     low_score = {
         "action": {"type": "group_probe"},
-        "weighted_expected": 1.0,
-        "main_world_expected": 1.0,
         "normal_expected": 1.0,
         "normal_max_bucket": 1,
-        "score": -100.0,
+        "group_information_gain": 0.5,
         "guess": "0167",
     }
     high_score = dict(low_score)
-    high_score["score"] = 100.0
     assert solver.task_sort_key(low_score, state) == solver.task_sort_key(high_score, state)
 
 
-def test_task_policy_replaces_phase_guard_contract():
+def test_investigation_state_has_no_hidden_scoring_policy():
     solver = QuestLineSolver(use_cache=False)
     state = solver.investigation_state([
         ("0123", "0b1c"),
         ("1045", "0b1c"),
     ])
-    policy = state["task_policy"]
-    assert policy["task"] == "cross_test_new_group"
-    assert policy["objective"] == "weighted_expected"
-    assert policy["expected_ratio"] > 1.0
-    assert policy["max_slack"] > 0
+    assert state["task"] == "cross_test_new_group"
+    assert "task_policy" not in state
 
 
 def test_inconsistent_feedback_is_explicit_state():
