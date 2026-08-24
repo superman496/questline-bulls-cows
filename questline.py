@@ -344,6 +344,22 @@ class _QuestLineCore:
             conditional_entropy += (bucket_size / total) * entropy(bucket)
         return prior_entropy - conditional_entropy
 
+    def route_continuity(self, history: History, code: Code) -> float:
+        """Score how strongly a code preserves the previous posterior's patterns."""
+        normalized = normalize_history(history)
+        if not normalized:
+            return 0.0
+        previous_candidates = self.filter_candidates(normalized[:-1])
+        if not previous_candidates:
+            return 0.0
+        stats = self.stats(previous_candidates)
+        total = len(previous_candidates)
+        pairs = combinations(sorted(code), 2)
+        triples = combinations(sorted(code), 3)
+        pair_score = sum(stats["pair"]["".join(combo)] / total for combo in pairs)
+        triple_score = sum(stats["tri"]["".join(combo)] / total for combo in triples)
+        return pair_score + triple_score
+
     def world_line_analysis(self, history: History) -> Dict[str, object]:
         """Summarize the strongest fixed-group world and its supporting patterns."""
         normalized = normalize_history(history)
@@ -729,7 +745,7 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         "converge_outer_choice": "收束外围分歧",
         "resolve_group_conflict": "拆解数字关系",
         "apply_position_pressure": "施加位置压力",
-        "resolve_endgame": "验证残局排列",
+        "resolve_endgame": "收束残局",
     }
 
     @classmethod
@@ -1161,7 +1177,7 @@ class _QuestLineReasoningLayer(_QuestLineCore):
             if len(new_groups) != 1:
                 return False
             new_group = new_groups[0]
-            return counts.get(new_group) == 2
+            return counts.get(new_group) in {1, 2}
         if task == "converge_outer_choice":
             if action_type != "group_probe":
                 return False
@@ -1735,12 +1751,17 @@ class QuestLineSolver(_QuestLineReasoningLayer):
         avg_index, avg_exp, avg_max, avg_bucket_count = self.best_pure_guess(candidates, "avg")
 
         if phase == "endgame" and len(candidates) <= 10 and avg_max == 1:
+            endgame_candidates = sorted(
+                candidates,
+                key=lambda index: (-self.route_continuity(normalized, ALL_CODES[index]), ALL_CODES[index]),
+            )
+            primary_index = endgame_candidates[0]
             return {
                 "phase": phase,
                 "investigation": investigation,
                 "candidates": [ALL_CODES[i] for i in candidates],
                 "avg_anchor": {"guess": ALL_CODES[avg_index], "exp": avg_exp, "max": avg_max, "bucket_count": avg_bucket_count},
-                "recommendations": [{"guess": ALL_CODES[avg_index], "score": avg_exp, "is_candidate": avg_index in candidate_set, "reason": "perfect endgame split", "action": self.classify_action(ALL_CODES[avg_index], normalized, investigation, avg_index in candidate_set)}],
+                "recommendations": [{"guess": ALL_CODES[primary_index], "score": avg_exp, "is_candidate": True, "reason": "preserves the strongest current route", "action": self.classify_action(ALL_CODES[primary_index], normalized, investigation, True)}],
             }
 
         scored: List[Dict[str, object]] = []

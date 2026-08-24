@@ -553,7 +553,7 @@ def print_adventure_guidance(session: questline.GameSession, solver: Any, lang: 
         "converge_outer_choice": "收束外围分歧",
         "resolve_group_conflict": "拆解数字关系",
         "apply_position_pressure": "施加位置压力",
-        "resolve_endgame": "验证残局排列",
+        "resolve_endgame": "收束残局",
     }
     task = investigation.get("task", "")
     print(f"当前答案范围：{len(candidates)} 个可能答案" if lang == "zh" else f"Current answer range: {len(candidates)} possible answers")
@@ -593,7 +593,7 @@ def print_adventure_situation(session: questline.GameSession, lang: str) -> None
         "converge_outer_choice": "收束外围分歧",
         "resolve_group_conflict": "拆解数字关系",
         "apply_position_pressure": "施加位置压力",
-        "resolve_endgame": "验证残局排列",
+        "resolve_endgame": "收束残局",
     }
     if lang == "zh":
         print(f"局势判断：当前答案范围还有 {state['candidate_count']} 个可能答案；当前任务是{task_labels.get(investigation.get('task'), investigation.get('task', '继续调查'))}。")
@@ -791,7 +791,7 @@ def strategy_state(result: Dict[str, Any], lang: str) -> str:
         "converge_outer_choice": "收束外围分歧",
         "resolve_group_conflict": "拆解数字关系",
         "apply_position_pressure": "施加位置压力",
-        "resolve_endgame": "验证残局排列",
+        "resolve_endgame": "收束残局",
     }
     if task: return labels.get(task, task) if lang == "zh" else task
     return tr(lang, "normal")
@@ -818,7 +818,9 @@ def build_menu(solver: Any, result: Dict[str, Any], history: History) -> List[Di
             avg_i, avg_e, avg_m, avg_b = solver.best_pure_guess(cand_idx, "avg")
             avg_guess = questline.ALL_CODES[avg_i]
             if avg_guess not in seen:
-                menu.append({"guess": avg_guess, "source": "AVG", "normal_expected": avg_e, "normal_max_bucket": avg_m, "bucket_count": avg_b}); seen.add(avg_guess)
+                primary_guess = str((result.get("recommendations") or [{}])[0].get("guess", ""))
+                source = "Conspiracy" if phase == "endgame" and primary_guess and avg_guess != primary_guess else "AVG"
+                menu.append({"guess": avg_guess, "source": source, "normal_expected": avg_e, "normal_max_bucket": avg_m, "bucket_count": avg_b, "reason": "tests the mathematical alternative" if source == "Conspiracy" else ""}); seen.add(avg_guess)
             mm_i, mm_e, mm_m, mm_b = solver.best_pure_guess(cand_idx, "mm")
             mm_guess = questline.ALL_CODES[mm_i]
             if mm_guess not in seen:
@@ -834,16 +836,23 @@ def build_menu(solver: Any, result: Dict[str, Any], history: History) -> List[Di
                 conspiracy_candidate = candidate
                 break
         if conspiracy_candidate is None:
-            for candidate in candidates:
-                if candidate not in seen:
-                    conspiracy_candidate = candidate
-                    break
+            alternatives = [candidate for candidate in candidates if candidate not in seen]
+            if alternatives:
+                conspiracy_candidate = min(
+                    alternatives,
+                    key=lambda candidate: (solver.route_continuity(history, candidate), candidate),
+                )
         if conspiracy_candidate:
+            conspiracy_index = questline.CODE_TO_INDEX[conspiracy_candidate]
+            conspiracy_exp, conspiracy_max, conspiracy_buckets = solver.avg_remaining(cand_idx, conspiracy_index)
             menu.append({
                 "guess": conspiracy_candidate,
                 "source": "Conspiracy",
                 "score": 0,
                 "reason": "tests a rival answer structure",
+                "normal_expected": conspiracy_exp,
+                "normal_max_bucket": conspiracy_max,
+                "bucket_count": conspiracy_buckets,
             }); seen.add(conspiracy_candidate)
     return menu[:6]
 
@@ -928,20 +937,6 @@ def print_report(solver: Any, history: History, lang: str, state: CliState, reve
             print(f"Identity facts: confirmed {''.join(confirmed) or 'none'}; likely {''.join(likely) or 'none'}")
             print(f"Group conflicts: {', '.join(conflicts) or 'none'}")
             print(f"Positions needing verification: {''.join(uncertain_positions) or 'none'}")
-        action_summary = result.get("action_summary") or {}
-        if action_summary and lang == "zh":
-            action_labels = {
-                "group_probe": "调查新线索",
-                "position_probe": "施加位置压力",
-                "candidate_probe": "验证残局答案",
-                "mechanical_split": "区分答案范围",
-            }
-            readable_actions = "、".join(
-                action_labels.get(action, action) for action in action_summary
-            )
-            print(f"建议方向: {readable_actions}")
-        elif action_summary:
-            print(f"Suggested directions: {', '.join(action_summary)}")
     ans = unique_answer(solver, history) if reveal_logic and rem == 1 else None
     if ans:
         print(tr(lang, "logic_solved", answer=ans))
