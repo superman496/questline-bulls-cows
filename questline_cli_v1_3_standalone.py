@@ -825,9 +825,26 @@ def build_menu(solver: Any, result: Dict[str, Any], history: History) -> List[Di
                 menu.append({"guess": mm_guess, "source": "MM", "normal_expected": mm_e, "normal_max_bucket": mm_m, "bucket_count": mm_b}); seen.add(mm_guess)
         except Exception:
             pass
-        for candidate in reversed(candidates):
-            if candidate not in seen:
-                menu.append({"guess": candidate, "source": "Conspiracy", "score": 0}); seen.add(candidate); break
+        world = solver.world_line_analysis(history)
+        main_signature = tuple((world.get("main_world") or {}).get("signature", []))
+        conspiracy_candidate = None
+        for candidate in candidates:
+            signature = tuple(solver.fixed_signature(candidate))
+            if signature != main_signature and candidate not in seen:
+                conspiracy_candidate = candidate
+                break
+        if conspiracy_candidate is None:
+            for candidate in candidates:
+                if candidate not in seen:
+                    conspiracy_candidate = candidate
+                    break
+        if conspiracy_candidate:
+            menu.append({
+                "guess": conspiracy_candidate,
+                "source": "Conspiracy",
+                "score": 0,
+                "reason": "tests a rival answer structure",
+            }); seen.add(conspiracy_candidate)
     return menu[:6]
 
 

@@ -1664,6 +1664,39 @@ class QuestLineSolver(_QuestLineReasoningLayer):
         return (action_rank,) + objective + (item["guess"],)
 
     @staticmethod
+    def diversify_recommendations(items: List[Dict[str, object]], limit: int) -> List[Dict[str, object]]:
+        """Keep the recommendation panel decision-worthy without changing scores."""
+        selected: List[Dict[str, object]] = []
+        seen_intents = set()
+
+        def intent(item: Dict[str, object]) -> Tuple[object, ...]:
+            action = item.get("action", {})
+            action_type = action.get("type")
+            new_groups = tuple(action.get("new_groups", []))
+            if action_type == "group_probe" and new_groups:
+                return (action_type, new_groups)
+            if action_type == "position_probe":
+                return (action_type, tuple(action.get("new_positions", [])))
+            if action_type == "candidate_probe":
+                return (action_type, item.get("guess"))
+            return (action_type,)
+
+        for item in items:
+            key = intent(item)
+            if key in seen_intents:
+                continue
+            selected.append(item)
+            seen_intents.add(key)
+            if len(selected) >= limit:
+                return selected
+        for item in items:
+            if item not in selected:
+                selected.append(item)
+                if len(selected) >= limit:
+                    break
+        return selected
+
+    @staticmethod
     def used_positions(history: List[Tuple[Code, Feedback]]) -> Dict[str, set[int]]:
         used: Dict[str, set[int]] = defaultdict(set)
         for guess, _ in history:
@@ -1741,6 +1774,7 @@ class QuestLineSolver(_QuestLineReasoningLayer):
             investigation["task_status"] = "task_infeasible"
             investigation["next_task"] = self.task_transition(task)
         guarded.sort(key=lambda x: self.task_sort_key(x, investigation))
+        recommendations = self.diversify_recommendations(guarded, top_k)
         action_summary = Counter(item["action"]["type"] for item in guarded)
         return {
             "phase": phase,
@@ -1749,7 +1783,7 @@ class QuestLineSolver(_QuestLineReasoningLayer):
             "avg_anchor": {"guess": ALL_CODES[avg_index], "exp": avg_exp, "max": avg_max, "bucket_count": avg_bucket_count},
             "action_summary": dict(action_summary),
             "task_eligible_count": len(structurally_eligible),
-            "recommendations": guarded[:top_k],
+            "recommendations": recommendations,
             "raw_recommendations": guarded[:top_k],
         }
 
