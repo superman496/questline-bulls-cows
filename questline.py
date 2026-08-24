@@ -1713,6 +1713,52 @@ class QuestLineSolver(_QuestLineReasoningLayer):
         return selected
 
     @staticmethod
+    def recommendation_profile(item: Dict[str, object], stats: Dict[str, object]) -> Tuple[object, ...]:
+        action = item.get("action", {})
+        new_groups = tuple(action.get("new_groups", []))
+        new_positions = tuple(action.get("new_positions", []))
+        guess = str(item.get("guess", ""))
+        strong_pairs = tuple(
+            pair for pair, _ in stats["pair"].most_common(6) if all(digit in guess for digit in pair)
+        )
+        strong_triples = tuple(
+            triple for triple, _ in stats["tri"].most_common(6) if all(digit in guess for digit in triple)
+        )
+        return (action.get("type"), new_groups, new_positions, strong_pairs, strong_triples)
+
+    @staticmethod
+    def efficiency_frontier(items: List[Dict[str, object]], avg: Tuple[float, int], mm: Tuple[float, int]) -> List[Dict[str, object]]:
+        """Keep routes that are not strictly worse than both AVG and MM."""
+        expected_limit = max(avg[0], mm[0])
+        max_limit = max(avg[1], mm[1])
+        frontier = [
+            item for item in items
+            if item["normal_expected"] <= expected_limit
+            or item["normal_max_bucket"] <= max_limit
+        ]
+        return frontier or items
+
+    @classmethod
+    def select_questline_routes(cls, items: List[Dict[str, object]], stats: Dict[str, object], limit: int = 3) -> List[Dict[str, object]]:
+        selected = []
+        seen_profiles = set()
+        for item in items:
+            profile = cls.recommendation_profile(item, stats)
+            if profile in seen_profiles:
+                continue
+            selected.append(item)
+            seen_profiles.add(profile)
+            if len(selected) == limit:
+                break
+        if len(selected) < limit:
+            for item in items:
+                if item not in selected:
+                    selected.append(item)
+                    if len(selected) == limit:
+                        break
+        return selected
+
+    @staticmethod
     def used_positions(history: List[Tuple[Code, Feedback]]) -> Dict[str, set[int]]:
         used: Dict[str, set[int]] = defaultdict(set)
         for guess, _ in history:
@@ -1756,14 +1802,37 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 key=lambda index: (-self.route_continuity(normalized, ALL_CODES[index]), ALL_CODES[index]),
             )
             primary_index = endgame_candidates[0]
+            route_items = [
+                {
+                    "guess": ALL_CODES[index],
+                    "source": "QuestLine",
+                    "is_candidate": True,
+                    "normal_expected": avg_exp,
+                    "normal_max_bucket": avg_max,
+                    "bucket_count": avg_bucket_count,
+                    "reason": "preserves the strongest current route",
+                    "action": self.classify_action(ALL_CODES[index], normalized, investigation, True),
+                }
+                for index in endgame_candidates[:3]
+            ]
+            while len(route_items) < 3:
+                route_items.append(dict(route_items[-1]))
+            mm_index, mm_exp, mm_max, mm_bucket_count = self.best_pure_guess(candidates, "mm")
+            tail_index = endgame_candidates[-1]
+            recommendations = route_items + [
+                {"guess": ALL_CODES[avg_index], "source": "AVG", "normal_expected": avg_exp, "normal_max_bucket": avg_max, "bucket_count": avg_bucket_count, "reason": "pure average benchmark"},
+                {"guess": ALL_CODES[mm_index], "source": "MM", "normal_expected": mm_exp, "normal_max_bucket": mm_max, "bucket_count": mm_bucket_count, "reason": "minimax benchmark"},
+                {"guess": ALL_CODES[tail_index], "source": "Conspiracy", "normal_expected": avg_exp, "normal_max_bucket": avg_max, "bucket_count": avg_bucket_count, "reason": "last efficient QuestLine route"},
+            ]
             return {
                 "phase": phase,
                 "investigation": investigation,
                 "candidates": [ALL_CODES[i] for i in candidates],
                 "avg_anchor": {"guess": ALL_CODES[avg_index], "exp": avg_exp, "max": avg_max, "bucket_count": avg_bucket_count},
-                "recommendations": [{"guess": ALL_CODES[primary_index], "score": avg_exp, "is_candidate": True, "reason": "preserves the strongest current route", "action": self.classify_action(ALL_CODES[primary_index], normalized, investigation, True)}],
+                "recommendations": recommendations,
             }
 
+        stats = self.stats(candidates)
         scored: List[Dict[str, object]] = []
         for guess_index, guess in enumerate(ALL_CODES):
             normal_exp, normal_max, _ = self.avg_remaining(candidates, guess_index)
@@ -1783,6 +1852,7 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 "normal_expected": normal_exp,
                 "normal_max_bucket": normal_max,
                 "group_information_gain": group_information_gain,
+                "evidence_profile": self.recommendation_profile({"guess": guess, "action": action}, stats),
             })
             scored[-1]["action"] = action
         task = investigation.get("task")
@@ -1795,7 +1865,15 @@ class QuestLineSolver(_QuestLineReasoningLayer):
             investigation["task_status"] = "task_infeasible"
             investigation["next_task"] = self.task_transition(task)
         guarded.sort(key=lambda x: self.task_sort_key(x, investigation))
-        recommendations = self.diversify_recommendations(guarded, top_k)
+        mm_index, mm_exp, mm_max, mm_bucket_count = self.best_pure_guess(candidates, "mm")
+        efficiency_pool = self.efficiency_frontier(guarded, (avg_exp, avg_max), (mm_exp, mm_max))
+        questline_routes = self.select_questline_routes(efficiency_pool, stats, limit=3)
+        selected_guesses = {item["guess"] for item in questline_routes}
+        tail = next((item for item in reversed(efficiency_pool) if item["guess"] not in selected_guesses), questline_routes[-1])
+        recommendations = [dict(item, source="QuestLine") for item in questline_routes]
+        recommendations.append({"guess": ALL_CODES[avg_index], "source": "AVG", "normal_expected": avg_exp, "normal_max_bucket": avg_max, "bucket_count": avg_bucket_count, "reason": "pure average benchmark"})
+        recommendations.append({"guess": ALL_CODES[mm_index], "source": "MM", "normal_expected": mm_exp, "normal_max_bucket": mm_max, "bucket_count": mm_bucket_count, "reason": "minimax benchmark"})
+        recommendations.append(dict(tail, source="Conspiracy", reason="last efficient QuestLine route"))
         action_summary = Counter(item["action"]["type"] for item in guarded)
         return {
             "phase": phase,
@@ -1804,7 +1882,7 @@ class QuestLineSolver(_QuestLineReasoningLayer):
             "avg_anchor": {"guess": ALL_CODES[avg_index], "exp": avg_exp, "max": avg_max, "bucket_count": avg_bucket_count},
             "action_summary": dict(action_summary),
             "task_eligible_count": len(structurally_eligible),
-            "recommendations": recommendations,
+            "recommendations": recommendations[:top_k],
             "raw_recommendations": guarded[:top_k],
         }
 
