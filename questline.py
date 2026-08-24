@@ -27,6 +27,7 @@ from collections import Counter, defaultdict
 from itertools import combinations, permutations
 from pathlib import Path
 import argparse
+import math
 import os
 import re
 import time
@@ -319,26 +320,29 @@ class _QuestLineCore:
     def fixed_signature(code: Code) -> Tuple[int, ...]:
         return tuple(sum(ch in group for ch in code) for group in FIXED_GROUPS.values())
 
-    def candidate_weights(self, candidates: Tuple[int, ...], stats: Dict[str, object]) -> Tuple[Dict[int, float], Tuple[int, ...]]:
-        cached = self._weights_cache.get(candidates)
-        if cached is not None:
-            return cached
-        worlds: DefaultDict[Tuple[int, ...], List[int]] = defaultdict(list)
-        for index in candidates:
-            worlds[self.fixed_signature(ALL_CODES[index])].append(index)
+    def group_information_gain(self, candidates: Tuple[int, ...], guess: Code, group: str) -> float:
+        """Measure information gained about a group's 0/1/2 membership count."""
+        if not candidates:
+            return 0.0
+        self.ensure_matrix()
+        assert self.feedback_matrix is not None
+        prior = Counter(sum(digit in FIXED_GROUPS[group] for digit in ALL_CODES[index]) for index in candidates)
         total = len(candidates)
-        world_scores = {signature: (len(members) / total) ** 1.35 for signature, members in worlds.items()}
-        weights: Dict[int, float] = {}
-        for signature, members in worlds.items():
-            for index in members:
-                weights[index] = world_scores[signature] * self._candidate_base_weight(ALL_CODES[index], stats)
-        weight_sum = sum(weights.values())
-        if weight_sum > 0:
-            weights = {k: v / weight_sum for k, v in weights.items()}
-        main_signature = max(world_scores, key=world_scores.get)
-        result = (weights, tuple(worlds[main_signature]))
-        self._weights_cache[candidates] = result
-        return result
+
+        def entropy(counter: Counter[int]) -> float:
+            return -sum((count / total) * math.log2(count / total) for count in counter.values() if count)
+
+        prior_entropy = entropy(prior)
+        buckets: DefaultDict[int, Counter[int]] = defaultdict(Counter)
+        row = self.feedback_matrix[CODE_TO_INDEX[guess]]
+        for index in candidates:
+            membership = sum(digit in FIXED_GROUPS[group] for digit in ALL_CODES[index])
+            buckets[row[index]][membership] += 1
+        conditional_entropy = 0.0
+        for bucket in buckets.values():
+            bucket_size = sum(bucket.values())
+            conditional_entropy += (bucket_size / total) * entropy(bucket)
+        return prior_entropy - conditional_entropy
 
     def world_line_analysis(self, history: History) -> Dict[str, object]:
         """Summarize the strongest fixed-group world and its supporting patterns."""
@@ -573,7 +577,7 @@ class _QuestLineCore:
         if task == "establish_foundation":
             return "先建立基础数字关系，给后续组间比较提供共同参照。"
         if task == "introduce_45":
-            return "01 与 23 已有第一层证据，现在引入 45，观察可信主线是否延伸。"
+            return "01 与 23 已有第一层证据，现在扩大调查范围，观察可信主线是否延伸。"
         if task in {"investigate_outer_groups", "cross_test_new_group"}:
             return f"当前需要补上尚未验证的线索，行动选择测试 {groups}，同时保持基本信息效率。"
         if task == "converge_outer_choice":
@@ -624,7 +628,7 @@ class _QuestLineCore:
         if support_risen:
             parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(support_risen)} 在当前答案范围内的支持上升，但这还不等于身份确认。")
         if changes.get("support_fallen"):
-            parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['support_fallen'])} 在候选世界中的支持下降。")
+            parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(changes['support_fallen'])} 在当前答案范围内的支持下降。")
         active_digits = {
             digit for digit in DIGITS
             if after.get("digit_status", {}).get(digit, {}).get("status") != "excluded"
@@ -702,41 +706,6 @@ class _QuestLineCore:
         if old_task != new_task:
             parts.append(f"调查转向：{_QuestLineReasoningLayer.public_task(new_task)}。")
         return "".join(parts)
-
-    def _candidate_base_weight(self, code: Code, stats: Dict[str, object]) -> float:
-        n = stats["n"]
-        dc: Counter[str] = stats["dc"]
-        pc: List[Counter[str]] = stats["pc"]
-        pair: Counter[str] = stats["pair"]
-        tri: Counter[str] = stats["tri"]
-        quad: Counter[str] = stats["quad"]
-        sorted_code = sorted(code)
-        digit_score = 1.0
-        for ch in code:
-            digit_score *= 0.35 + dc[ch] / n
-        position_score = 1.0
-        for pos, ch in enumerate(code):
-            position_score *= 0.35 + pc[pos][ch] / n
-        pair_score = 1.0
-        for combo in combinations(sorted_code, 2):
-            pair_score *= 0.55 + 0.35 * (pair["".join(combo)] / n)
-        triple_score = 1.0
-        for combo in combinations(sorted_code, 3):
-            triple_score *= 0.70 + 0.18 * (tri["".join(combo)] / n)
-        quad_score = 0.80 + 0.12 * (quad["".join(sorted_code)] / n)
-        penalty = 1.0
-        for digit in stats["top_digits"]:
-            if digit not in code:
-                penalty *= 0.86
-        for p in stats["top_pairs"]:
-            if not all(ch in code for ch in p):
-                penalty *= 0.94
-        for t in stats["top_triples"]:
-            if not all(ch in code for ch in t):
-                penalty *= 0.97
-        penalty *= 0.80 + 0.40 * (quad["".join(sorted_code)] / n)
-        return digit_score * position_score * pair_score * triple_score * quad_score * penalty
-
 
 class _QuestLineReasoningLayer(_QuestLineCore):
     """Organize transition explanations into a continuous investigation story."""
@@ -818,8 +787,14 @@ class _QuestLineReasoningLayer(_QuestLineCore):
             else:
                 strong_entries = entries[:1]
                 weak_entries = entries[-1:]
-            strong = [f"{key}（{support:.0%}）" for key, support in strong_entries]
-            weak = [f"{key}（{support:.0%}）" for key, support in reversed(weak_entries)]
+            def render(items: List[Tuple[str, float]]) -> List[str]:
+                limit = 8
+                result = [f"{key}（{support:.0%}）" for key, support in items[:limit]]
+                if len(items) > limit:
+                    result.append(f"等{len(items) - limit}项")
+                return result
+            strong = render(strong_entries)
+            weak = render(list(reversed(weak_entries)))
             return strong, weak, meaningful
 
         digit_status = self.solver.investigation_state(history).get("digit_status", {})
@@ -1010,7 +985,7 @@ class _QuestLineReasoningLayer(_QuestLineCore):
                 if direct:
                     parts.append(f"- 显式证据（反馈）：{self._format_digits(direct)} 被本轮反馈明确保留。")
                 if inferred:
-                    parts.append(f"- 结果集归纳确认：{self._format_digits(inferred)}；它们是结合全部历史反馈后，在所有剩余世界中都被保留下来。")
+                    parts.append(f"- 结果集归纳确认：{self._format_digits(inferred)}；它们是结合全部历史反馈后，在所有可能答案中都被保留下来。")
             if facts.get("excluded"):
                 direct = [digit for digit in facts["excluded"] if digit in direct_excluded]
                 inferred = [digit for digit in facts["excluded"] if digit not in direct]
@@ -1120,22 +1095,6 @@ class _QuestLineReasoningLayer(_QuestLineCore):
             "digit_index": dict(self.digit_index),
             "group_index": dict(self.group_index),
         }
-
-    def weighted_stats(self, candidates: Tuple[int, ...], guess_index: int, weights: Dict[int, float]) -> Tuple[float, float, int]:
-        self.ensure_matrix()
-        assert self.feedback_matrix is not None
-        row = self.feedback_matrix[guess_index]
-        buckets: DefaultDict[int, List[int]] = defaultdict(list)
-        for answer_index in candidates:
-            buckets[row[answer_index]].append(answer_index)
-        total_w = sum(weights[idx] for idx in candidates)
-        expected = 0.0
-        max_weight = 0.0
-        for bucket in buckets.values():
-            bucket_w = sum(weights[idx] for idx in bucket)
-            expected += (bucket_w / total_w) * len(bucket)
-            max_weight = max(max_weight, bucket_w)
-        return expected, max_weight, len(buckets)
 
     # ------------------------------------------------------------------
     # Signal modes and strategy scoring
@@ -1635,7 +1594,6 @@ class QuestLineSolver(_QuestLineReasoningLayer):
             "available_actions": available_actions,
             "preferred_actions": preferred_actions,
             "task_status": "ready",
-            "task_policy": self.task_policy(task, candidate_count),
         }
 
     def game_phase(self, history: List[Tuple[Code, Feedback]], candidates: Tuple[int, ...]) -> str:
@@ -1646,32 +1604,6 @@ class QuestLineSolver(_QuestLineReasoningLayer):
         if len(candidates) <= 12:
             return "endgame"
         return "case"
-
-    @staticmethod
-    def task_policy(task: str, candidate_count: int) -> Dict[str, object]:
-        """Describe the current task's objective and efficiency contract."""
-        policies = {
-            "establish_foundation": ("weighted_expected", 1.20, 2.0, 1.35, 4),
-            "introduce_45": ("weighted_expected", 1.20, 2.0, 1.35, 4),
-            "investigate_outer_groups": ("weighted_expected", 1.35, 2.5, 1.50, 5),
-            "cross_test_new_group": ("weighted_expected", 1.35, 2.5, 1.50, 5),
-            "converge_outer_choice": ("main_world_expected", 1.55, 3.0, 1.75, 6),
-            "resolve_group_conflict": ("main_world_expected", 1.45, 3.0, 1.65, 6),
-            "apply_position_pressure": ("normal_expected", 1.30, 2.5, 1.50, 5),
-            "resolve_endgame": ("normal_max_bucket", 1.80, 3.0, 2.00, 6),
-        }
-        objective, exp_ratio, exp_slack, max_ratio, max_slack = policies.get(
-            task, ("normal_expected", 1.35, 2.5, 1.55, 5)
-        )
-        return {
-            "task": task,
-            "objective": objective,
-            "expected_ratio": exp_ratio,
-            "expected_slack": exp_slack,
-            "max_ratio": max_ratio,
-            "max_slack": max_slack,
-            "candidate_count": candidate_count,
-        }
 
     @staticmethod
     def task_transition(task: str) -> Optional[str]:
@@ -1700,42 +1632,34 @@ class QuestLineSolver(_QuestLineReasoningLayer):
         action_type = action["type"]
         preferred = investigation.get("preferred_actions", [])
         action_rank = preferred.index(action_type) if action_type in preferred else len(preferred)
-
         if task in {"establish_foundation", "introduce_45", "cross_test_new_group", "investigate_outer_groups"}:
             objective = (
-                item["weighted_expected"],
-                item["main_world_expected"],
                 item["normal_expected"],
                 item["normal_max_bucket"],
+                -item["group_information_gain"],
             )
         elif task == "converge_outer_choice":
             objective = (
-                item["main_world_expected"],
-                item["weighted_expected"],
                 item["normal_expected"],
                 item["normal_max_bucket"],
+                -item["group_information_gain"],
             )
         elif task == "resolve_group_conflict":
             objective = (
-                item["main_world_expected"],
                 item["normal_max_bucket"],
                 item["normal_expected"],
-                item["weighted_expected"],
+                -item["group_information_gain"],
             )
         elif task == "apply_position_pressure":
             objective = (
                 item["normal_expected"],
                 item["normal_max_bucket"],
-                item["weighted_expected"],
-                item["main_world_expected"],
             )
         else:
             objective = (
                 -int(item["is_candidate"]),
                 item["normal_max_bucket"],
                 item["normal_expected"],
-                item["weighted_expected"],
-                item["main_world_expected"],
             )
         return (action_rank,) + objective + (item["guess"],)
 
@@ -1773,9 +1697,6 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 "task_eligible_count": 0,
             }
         phase = self.game_phase(normalized, candidates)
-        stats = self.stats(candidates)
-        n = stats["n"]
-        weights, main_candidates = self.candidate_weights(candidates, stats)
         candidate_set = set(candidates)
         used = self.used_positions(normalized)
         avg_index, avg_exp, avg_max, avg_bucket_count = self.best_pure_guess(candidates, "avg")
@@ -1789,47 +1710,36 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 "recommendations": [{"guess": ALL_CODES[avg_index], "score": avg_exp, "is_candidate": avg_index in candidate_set, "reason": "perfect endgame split", "action": self.classify_action(ALL_CODES[avg_index], normalized, investigation, avg_index in candidate_set)}],
             }
 
-        policy = investigation["task_policy"]
-        exp_limit = avg_exp * policy["expected_ratio"] + policy["expected_slack"]
-        max_limit = avg_max * policy["max_ratio"] + policy["max_slack"]
         scored: List[Dict[str, object]] = []
         for guess_index, guess in enumerate(ALL_CODES):
-            weighted_exp, weighted_max, bucket_count = self.weighted_stats(candidates, guess_index, weights)
             normal_exp, normal_max, _ = self.avg_remaining(candidates, guess_index)
-            main_exp, _, _ = self.avg_remaining(main_candidates, guess_index)
             is_candidate = guess_index in candidate_set
+            action = self.classify_action(guess, normalized, investigation, is_candidate)
+            group_information_gain = max(
+                (
+                    self.group_information_gain(candidates, guess, group)
+                    for group in action.get("new_groups", [])
+                    if group in FIXED_GROUPS
+                ),
+                default=0.0,
+            )
             scored.append({
                 "guess": guess,
                 "is_candidate": is_candidate,
-                "weighted_expected": weighted_exp,
                 "normal_expected": normal_exp,
                 "normal_max_bucket": normal_max,
-                "main_world_expected": main_exp,
-                "bucket_count": bucket_count,
+                "group_information_gain": group_information_gain,
             })
-            scored[-1]["action"] = self.classify_action(guess, normalized, investigation, is_candidate)
-        guarded = [
-            x for x in scored
-            if x["normal_expected"] <= exp_limit + 1e-9
-            and x["normal_max_bucket"] <= max_limit
-        ]
+            scored[-1]["action"] = action
         task = investigation.get("task")
         structurally_eligible = [x for x in scored if self.action_is_eligible(x["action"], task)]
-        task_eligible = [x for x in guarded if self.action_is_eligible(x["action"], task)]
-        if task_eligible:
-            guarded = task_eligible
-            investigation["task_status"] = "ready"
-        elif structurally_eligible:
+        if structurally_eligible:
             guarded = structurally_eligible
-            investigation["task_status"] = "task_relaxable"
+            investigation["task_status"] = "ready"
         else:
             guarded = scored
             investigation["task_status"] = "task_infeasible"
             investigation["next_task"] = self.task_transition(task)
-        if all(x["guess"] != ALL_CODES[avg_index] for x in guarded) and not structurally_eligible:
-            avg_item = next((x for x in scored if x["guess"] == ALL_CODES[avg_index]), None)
-            if avg_item:
-                guarded.append(avg_item)
         guarded.sort(key=lambda x: self.task_sort_key(x, investigation))
         action_summary = Counter(item["action"]["type"] for item in guarded)
         return {
@@ -1837,9 +1747,8 @@ class QuestLineSolver(_QuestLineReasoningLayer):
             "investigation": investigation,
             "candidates": [ALL_CODES[i] for i in candidates],
             "avg_anchor": {"guess": ALL_CODES[avg_index], "exp": avg_exp, "max": avg_max, "bucket_count": avg_bucket_count},
-            "task_policy": policy,
             "action_summary": dict(action_summary),
-            "task_eligible_count": len(task_eligible),
+            "task_eligible_count": len(structurally_eligible),
             "recommendations": guarded[:top_k],
             "raw_recommendations": guarded[:top_k],
         }

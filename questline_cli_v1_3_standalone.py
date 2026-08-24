@@ -568,7 +568,7 @@ def print_adventure_guidance(session: questline.GameSession, solver: Any, lang: 
             if lang == "zh":
                 reason = {
                     "fixed first guess": "建立第一层基础事实",
-                    "opening book: stable AVG second move": "引入 45 组，建立共同参照",
+                    "opening book: stable AVG second move": "扩大调查范围，建立共同参照",
                     "introduces untested groups": "引入尚未调查的小组",
                     "reuses tested digits in new positions": "用新位置验证已有数字",
                     "tests a remaining candidate directly": "直接验证一个残局候选",
@@ -912,8 +912,19 @@ def print_report(solver: Any, history: History, lang: str, state: CliState, reve
             print(f"Group conflicts: {', '.join(conflicts) or 'none'}")
             print(f"Positions needing verification: {''.join(uncertain_positions) or 'none'}")
         action_summary = result.get("action_summary") or {}
-        if action_summary:
-            print(f"行动候选: {action_summary}" if lang == "zh" else f"Action candidates: {action_summary}")
+        if action_summary and lang == "zh":
+            action_labels = {
+                "group_probe": "调查新线索",
+                "position_probe": "施加位置压力",
+                "candidate_probe": "验证残局答案",
+                "mechanical_split": "区分答案范围",
+            }
+            readable_actions = "、".join(
+                action_labels.get(action, action) for action in action_summary
+            )
+            print(f"建议方向: {readable_actions}")
+        elif action_summary:
+            print(f"Suggested directions: {', '.join(action_summary)}")
     ans = unique_answer(solver, history) if reveal_logic and rem == 1 else None
     if ans:
         print(tr(lang, "logic_solved", answer=ans))
@@ -964,6 +975,11 @@ def print_report(solver: Any, history: History, lang: str, state: CliState, reve
     if include_candidates and candidates and len(candidates) <= 20:
         print(f"\n{tr(lang, 'candidates')}")
         for code in candidates: print(f"  {code}")
+    if history:
+        current_book = questline.StoryBook.from_history(history, solver=solver)
+        facts = current_book.render_current_facts()
+        if facts:
+            print(f"\n当前盘面:\n{facts}" if lang == "zh" else f"\nCurrent board:\n{facts}")
 
 
 def find_menu_match(guess: str, menu: List[Dict[str, Any]]) -> Tuple[str, Optional[int]]:
