@@ -91,7 +91,11 @@ def test_action_classifier_identifies_group_and_position_probes():
     group_action = solver.classify_action("2568", history, state, False)
     assert group_action["type"] == "group_probe"
     assert "67" in group_action["new_groups"] or "89" in group_action["new_groups"]
-    assert solver.action_is_eligible(group_action, "cross_test_new_group") is True
+    # "2568" mixes both untested groups (67 and 89) into one guess. cross_test_new_group
+    # investigates exactly one new group at a time, so a guess that confounds two of them
+    # is structurally ineligible even though it is a valid group_probe.
+    assert len(group_action["new_groups"]) == 2
+    assert solver.action_is_eligible(group_action, "cross_test_new_group") is False
 
     balanced_group_action = solver.classify_action("0167", history, state, True)
     assert balanced_group_action["new_groups"] == ["67"]
