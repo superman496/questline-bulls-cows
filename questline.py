@@ -344,21 +344,30 @@ class _QuestLineCore:
             conditional_entropy += (bucket_size / total) * entropy(bucket)
         return prior_entropy - conditional_entropy
 
-    def route_continuity(self, history: History, code: Code) -> float:
-        """Score how strongly a code preserves the previous posterior's patterns."""
-        normalized = normalize_history(history)
-        if not normalized:
+    @staticmethod
+    def _route_continuity_score(stats: Optional[Dict[str, object]], total: int, code: Code) -> float:
+        if not stats or not total:
             return 0.0
-        previous_candidates = self.filter_candidates(normalized[:-1])
-        if not previous_candidates:
-            return 0.0
-        stats = self.stats(previous_candidates)
-        total = len(previous_candidates)
         pairs = combinations(sorted(code), 2)
         triples = combinations(sorted(code), 3)
         pair_score = sum(stats["pair"]["".join(combo)] / total for combo in pairs)
         triple_score = sum(stats["tri"]["".join(combo)] / total for combo in triples)
         return pair_score + triple_score
+
+    def route_continuity_baseline(self, history: History) -> Tuple[Optional[Dict[str, object]], int]:
+        """Compute the previous posterior's stats once, shared across every guess."""
+        normalized = normalize_history(history)
+        if not normalized:
+            return None, 0
+        previous_candidates = self.filter_candidates(normalized[:-1])
+        if not previous_candidates:
+            return None, 0
+        return self.stats(previous_candidates), len(previous_candidates)
+
+    def route_continuity(self, history: History, code: Code) -> float:
+        """Score how strongly a code preserves the previous posterior's patterns."""
+        stats, total = self.route_continuity_baseline(history)
+        return self._route_continuity_score(stats, total, code)
 
     def world_line_analysis(self, history: History) -> Dict[str, object]:
         """Summarize the strongest fixed-group world and its supporting patterns."""
@@ -621,6 +630,15 @@ class _QuestLineCore:
             ]
             if exposed:
                 parts.append(f"数字 {_QuestLineReasoningLayer._format_digits(exposed)} 此前曾进入可信解释，本轮伪装破裂。")
+            group_mask_breaks = []
+            for group in GROUP_ORDER:
+                before_relation = before.get("group_relations", {}).get(group, {}).get("relation")
+                after_relation = after.get("group_relations", {}).get(group, {}).get("relation")
+                if before_relation in {"both_supported", "symmetric"} and after_relation == "both_excluded":
+                    members = _QuestLineReasoningLayer._format_digits(sorted(FIXED_GROUPS[group]))
+                    group_mask_breaks.append(f"{group}（{members}）此前看起来共同可信，本轮伪装破裂，整组被排除")
+            if group_mask_breaks:
+                parts.append("；".join(group_mask_breaks) + "。")
         excluded_now = [
             digit for digit in DIGITS
             if after.get("digit_status", {}).get(digit, {}).get("status") == "excluded"
@@ -747,10 +765,67 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         "apply_position_pressure": "施加位置压力",
         "resolve_endgame": "收束残局",
     }
+    PUBLIC_TASKS_EN = {
+        "establish_foundation": "Establish the first reference",
+        "introduce_45": "Expand the investigation",
+        "investigate_outer_groups": "Probe the outer groups",
+        "cross_test_new_group": "Cross-test a new group",
+        "converge_outer_choice": "Converge the outer split",
+        "resolve_group_conflict": "Resolve the group conflict",
+        "apply_position_pressure": "Apply position pressure",
+        "resolve_endgame": "Resolve the endgame",
+    }
+
+    # Every "reason" string ever attached to a recommendation, in one place.
+    # classify_action() and choose() emit the English keys below; this is the
+    # single Chinese phrasing every caller (CLI or core) should present to a
+    # zh reader instead of hand-copying (and inevitably drifting from) it.
+    PUBLIC_REASONS = {
+        "repeats an already tested guess without adding information": "重复此前已经问过的猜法，不会带来新信息",
+        "tests a remaining candidate directly": "直接验证残局候选",
+        "introduces untested groups": "寻找尚未验证的线索",
+        "reuses tested digits in new positions": "复用已知数字，施加位置压力",
+        "tests a remaining candidate": "测试仍在候选空间中的答案",
+        "primarily separates feedback buckets": "区分当前答案范围",
+        "fixed first guess": "建立第一层参照",
+        "opening book: stable AVG second move": "扩大调查范围，建立共同参照",
+        "preserves the strongest current route": "延续当前最可信的调查路线",
+        "pure average benchmark": "全局期望最优基准",
+        "minimax benchmark": "全局最坏情况最优基准",
+        "last efficient QuestLine route": "效率仍合格的最后一条路线",
+    }
+
+    PUBLIC_ACTION_LABELS = {
+        "group_probe": "调查新线索",
+        "position_probe": "施加位置压力",
+        "candidate_probe": "验证残局答案",
+        "mechanical_split": "区分答案范围",
+    }
+    PUBLIC_ACTION_LABELS_EN = {
+        "group_probe": "New-group probe",
+        "position_probe": "Position pressure",
+        "candidate_probe": "Candidate check",
+        "mechanical_split": "Bucket split",
+    }
 
     @classmethod
-    def public_task(cls, task: Optional[str]) -> str:
-        return cls.PUBLIC_TASKS.get(task, "继续调查")
+    def public_task(cls, task: Optional[str], lang: str = "zh") -> str:
+        if lang == "zh":
+            return cls.PUBLIC_TASKS.get(task, "继续调查")
+        return cls.PUBLIC_TASKS_EN.get(task, "Continue investigating")
+
+    @classmethod
+    def public_reason(cls, reason: Optional[str], lang: str = "zh") -> str:
+        if reason is None:
+            return ""
+        if lang != "zh":
+            return reason
+        return cls.PUBLIC_REASONS.get(reason, reason)
+
+    @classmethod
+    def public_action_label(cls, action_type: Optional[str], lang: str = "zh") -> str:
+        table = cls.PUBLIC_ACTION_LABELS if lang == "zh" else cls.PUBLIC_ACTION_LABELS_EN
+        return table.get(action_type, "")
 
     @staticmethod
     def _position_board(state: Dict[str, object], limit: int = 3) -> List[str]:
@@ -816,6 +891,11 @@ class _QuestLineReasoningLayer(_QuestLineCore):
         digit_status = self.solver.investigation_state(history).get("digit_status", {})
         confirmed_digits = [digit for digit in DIGITS if digit_status.get(digit, {}).get("status") == "confirmed"]
         excluded_digits = [digit for digit in DIGITS if digit_status.get(digit, {}).get("status") == "excluded"]
+        if len(confirmed_digits) == CODE_LEN:
+            # Identity is fully resolved; every remaining candidate shares the same
+            # four digits, so a digit/pair/triple strength split has nothing left
+            # to say. Callers already state the locked identity themselves.
+            return []
         digit_entries = sorted(
             (
                 (digit, stats["freqs"].get(digit, 0.0))
@@ -1056,16 +1136,7 @@ class _QuestLineReasoningLayer(_QuestLineCore):
             for item in recommendations:
                 action = item.get("action", {})
                 reason = item.get("reason") or action.get("reason") or action.get("type", "继续拆分")
-                reason = {
-                    "fixed first guess": "建立第一层参照",
-                    "opening book: stable AVG second move": "扩大调查范围，建立共同参照",
-                    "introduces untested groups": "寻找尚未验证的线索",
-                    "reuses tested digits in new positions": "复用已知数字，施加位置压力",
-                    "tests a remaining candidate directly": "直接验证残局候选",
-                    "tests a remaining candidate": "测试仍在候选空间中的答案",
-                    "primarily separates feedback buckets": "区分当前答案范围",
-                    "perfect endgame split": "最大化区分残局候选",
-                }.get(reason, reason)
+                reason = self.public_reason(reason)
                 proposals.append(f"{item.get('guess')}（{reason}）")
             parts.append("下一轮组队建议：" + "；".join(proposals) + "。这些方案来自当前候选集的同一轮评分，分别代表不同的拆分取向；请玩家决定采用哪一队。")
         elif after.get("candidate_count", 0) == 1:
@@ -1209,17 +1280,14 @@ class StoryBook(_QuestLineReasoningLayer):
             lines.extend(["", f"## {chapter['title']}"])
             for event_index in chapter["event_indexes"]:
                 event = self.events[event_index]
-                deliberation = event.get("deliberation")
+                lines.append(event["narrative"])
                 if audit:
                     review = event.get("audit_review")
                     if review:
                         lines.append(self._audit_review_text(review, event["round"]))
+                    deliberation = event.get("deliberation")
                     if deliberation:
                         lines.extend(["", deliberation])
-                elif deliberation:
-                    lines.append(deliberation)
-                else:
-                    lines.append(event["narrative"])
 
         final = self.events[-1]
         if final["type"] == "solution_revealed":
@@ -1235,9 +1303,16 @@ class StoryBook(_QuestLineReasoningLayer):
         if facts:
             lines.extend(["", "## 当前已知事实", facts])
 
-        if include_indexes and not audit:
+        if audit or include_indexes:
             lines.extend(["", "## 角色索引", self.render_digit_index()])
             lines.extend(["", "## 阵营索引", self.render_group_index()])
+        if audit:
+            identity_arc = self.render_identity_arc()
+            if identity_arc:
+                lines.extend(["", "## 身份认知轨迹", identity_arc])
+            character_stories = self.render_character_stories()
+            if character_stories:
+                lines.extend(["", "## 数字角色档案", character_stories])
         return "\n".join(lines)
 
     def render_current_facts(self) -> str:
@@ -1313,7 +1388,7 @@ class StoryBook(_QuestLineReasoningLayer):
                 )
                 final_status = self.events[-1].get("after", {}).get("digit_status", {}).get(digit, {}).get("status")
                 if max_support < 0.75 and final_status == "excluded":
-                    interpretation = "曾被保留在候选空间，始终未进入可信解释"
+                    interpretation = "曾被保留在候选空间，但从未成为可信身份"
                 elif final_status == "confirmed":
                     interpretation = "最终进入可信解释"
                 else:
@@ -1390,7 +1465,7 @@ class StoryBook(_QuestLineReasoningLayer):
                     for event in self.events
                 )
                 if final_status == "excluded" and max_support < 0.75:
-                    entries.append("结案判断：它始终只是候选空间中的影子，从未进入可信解释，也没有成为可信身份。")
+                    entries.append("结案判断：它始终只是候选空间中的影子，从未成为可信身份。")
                 elif final_status == "confirmed":
                     entries.append("结案判断：它最终成为当前答案解释中不可替代的一员。")
                 rows.append(f"数字 {digit}\n" + " ".join(entries))
@@ -1639,9 +1714,11 @@ class QuestLineSolver(_QuestLineReasoningLayer):
     def task_sort_key(item: Dict[str, object], investigation: Dict[str, object]) -> Tuple[object, ...]:
         """Rank eligible actions by the current investigation objective.
 
-        The legacy score is deliberately absent from this key. AVG/MM limits
-        are applied before sorting; the task objectives and deterministic code
-        order decide the result from this point onward.
+        The legacy score is deliberately absent from this key. Order of
+        precedence: task fit (action_rank), then the task's own math
+        objective, then route continuity (prefer guesses that stay
+        consistent with the previous posterior's strong patterns), then
+        the deterministic code order as the final, always-decisive tie-break.
         """
         task = investigation.get("task")
         action = item["action"]
@@ -1677,40 +1754,8 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 item["normal_max_bucket"],
                 item["normal_expected"],
             )
-        return (action_rank,) + objective + (item["guess"],)
-
-    @staticmethod
-    def diversify_recommendations(items: List[Dict[str, object]], limit: int) -> List[Dict[str, object]]:
-        """Keep the recommendation panel decision-worthy without changing scores."""
-        selected: List[Dict[str, object]] = []
-        seen_intents = set()
-
-        def intent(item: Dict[str, object]) -> Tuple[object, ...]:
-            action = item.get("action", {})
-            action_type = action.get("type")
-            new_groups = tuple(action.get("new_groups", []))
-            if action_type == "group_probe" and new_groups:
-                return (action_type, new_groups)
-            if action_type == "position_probe":
-                return (action_type, tuple(action.get("new_positions", [])))
-            if action_type == "candidate_probe":
-                return (action_type, item.get("guess"))
-            return (action_type,)
-
-        for item in items:
-            key = intent(item)
-            if key in seen_intents:
-                continue
-            selected.append(item)
-            seen_intents.add(key)
-            if len(selected) >= limit:
-                return selected
-        for item in items:
-            if item not in selected:
-                selected.append(item)
-                if len(selected) >= limit:
-                    break
-        return selected
+        route_continuity = -item.get("route_continuity", 0.0)
+        return (action_rank,) + objective + (route_continuity, item["guess"])
 
     @staticmethod
     def recommendation_profile(item: Dict[str, object], stats: Dict[str, object]) -> Tuple[object, ...]:
@@ -1801,28 +1846,30 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 candidates,
                 key=lambda index: (-self.route_continuity(normalized, ALL_CODES[index]), ALL_CODES[index]),
             )
-            primary_index = endgame_candidates[0]
-            route_items = [
-                {
+            route_items = []
+            for index in endgame_candidates[:3]:
+                route_exp, route_max, route_bucket_count = self.avg_remaining(candidates, index)
+                route_items.append({
                     "guess": ALL_CODES[index],
                     "source": "QuestLine",
                     "is_candidate": True,
-                    "normal_expected": avg_exp,
-                    "normal_max_bucket": avg_max,
-                    "bucket_count": avg_bucket_count,
+                    "normal_expected": route_exp,
+                    "normal_max_bucket": route_max,
+                    "bucket_count": route_bucket_count,
                     "reason": "preserves the strongest current route",
                     "action": self.classify_action(ALL_CODES[index], normalized, investigation, True),
-                }
-                for index in endgame_candidates[:3]
-            ]
+                })
             while len(route_items) < 3:
                 route_items.append(dict(route_items[-1]))
             mm_index, mm_exp, mm_max, mm_bucket_count = self.best_pure_guess(candidates, "mm")
+            avg_guess, mm_guess = ALL_CODES[avg_index], ALL_CODES[mm_index]
+            avg_is_candidate, mm_is_candidate = avg_index in candidate_set, mm_index in candidate_set
             tail_index = endgame_candidates[-1]
+            tail_exp, tail_max, tail_bucket_count = self.avg_remaining(candidates, tail_index)
             recommendations = route_items + [
-                {"guess": ALL_CODES[avg_index], "source": "AVG", "normal_expected": avg_exp, "normal_max_bucket": avg_max, "bucket_count": avg_bucket_count, "reason": "pure average benchmark"},
-                {"guess": ALL_CODES[mm_index], "source": "MM", "normal_expected": mm_exp, "normal_max_bucket": mm_max, "bucket_count": mm_bucket_count, "reason": "minimax benchmark"},
-                {"guess": ALL_CODES[tail_index], "source": "Conspiracy", "normal_expected": avg_exp, "normal_max_bucket": avg_max, "bucket_count": avg_bucket_count, "reason": "last efficient QuestLine route"},
+                {"guess": avg_guess, "source": "AVG", "is_candidate": avg_is_candidate, "normal_expected": avg_exp, "normal_max_bucket": avg_max, "bucket_count": avg_bucket_count, "reason": "pure average benchmark", "action": self.classify_action(avg_guess, normalized, investigation, avg_is_candidate)},
+                {"guess": mm_guess, "source": "MM", "is_candidate": mm_is_candidate, "normal_expected": mm_exp, "normal_max_bucket": mm_max, "bucket_count": mm_bucket_count, "reason": "minimax benchmark", "action": self.classify_action(mm_guess, normalized, investigation, mm_is_candidate)},
+                {"guess": ALL_CODES[tail_index], "source": "Conspiracy", "is_candidate": True, "normal_expected": tail_exp, "normal_max_bucket": tail_max, "bucket_count": tail_bucket_count, "reason": "last efficient QuestLine route", "action": self.classify_action(ALL_CODES[tail_index], normalized, investigation, True)},
             ]
             return {
                 "phase": phase,
@@ -1833,6 +1880,7 @@ class QuestLineSolver(_QuestLineReasoningLayer):
             }
 
         stats = self.stats(candidates)
+        route_stats, route_total = self.route_continuity_baseline(normalized)
         scored: List[Dict[str, object]] = []
         for guess_index, guess in enumerate(ALL_CODES):
             normal_exp, normal_max, _ = self.avg_remaining(candidates, guess_index)
@@ -1852,6 +1900,7 @@ class QuestLineSolver(_QuestLineReasoningLayer):
                 "normal_expected": normal_exp,
                 "normal_max_bucket": normal_max,
                 "group_information_gain": group_information_gain,
+                "route_continuity": self._route_continuity_score(route_stats, route_total, guess),
                 "evidence_profile": self.recommendation_profile({"guess": guess, "action": action}, stats),
             })
             scored[-1]["action"] = action
@@ -1867,12 +1916,18 @@ class QuestLineSolver(_QuestLineReasoningLayer):
         guarded.sort(key=lambda x: self.task_sort_key(x, investigation))
         mm_index, mm_exp, mm_max, mm_bucket_count = self.best_pure_guess(candidates, "mm")
         efficiency_pool = self.efficiency_frontier(guarded, (avg_exp, avg_max), (mm_exp, mm_max))
-        questline_routes = self.select_questline_routes(efficiency_pool, stats, limit=3)
+        # At endgame, task_sort_key has already deliberately ranked testing a
+        # real remaining candidate above a purely efficient probe. The AVG/MM
+        # efficiency guardrail must not veto that choice for the QuestLine
+        # slots, so those slots are picked straight from the task ranking;
+        # the tail (Conspiracy) slot still comes from the guarded frontier.
+        questline_pool = guarded if task == "resolve_endgame" else efficiency_pool
+        questline_routes = self.select_questline_routes(questline_pool, stats, limit=3)
         selected_guesses = {item["guess"] for item in questline_routes}
         tail = next((item for item in reversed(efficiency_pool) if item["guess"] not in selected_guesses), questline_routes[-1])
         recommendations = [dict(item, source="QuestLine") for item in questline_routes]
-        recommendations.append({"guess": ALL_CODES[avg_index], "source": "AVG", "normal_expected": avg_exp, "normal_max_bucket": avg_max, "bucket_count": avg_bucket_count, "reason": "pure average benchmark"})
-        recommendations.append({"guess": ALL_CODES[mm_index], "source": "MM", "normal_expected": mm_exp, "normal_max_bucket": mm_max, "bucket_count": mm_bucket_count, "reason": "minimax benchmark"})
+        recommendations.append(dict(scored[avg_index], source="AVG", bucket_count=avg_bucket_count, reason="pure average benchmark"))
+        recommendations.append(dict(scored[mm_index], source="MM", bucket_count=mm_bucket_count, reason="minimax benchmark"))
         recommendations.append(dict(tail, source="Conspiracy", reason="last efficient QuestLine route"))
         action_summary = Counter(item["action"]["type"] for item in guarded)
         return {

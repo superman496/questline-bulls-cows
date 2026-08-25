@@ -1,4 +1,4 @@
-"""Evaluate QuestLine recommendations against the v1.3 world-line model.
+"""Evaluate QuestLine recommendations against the world-line model.
 
 This benchmark measures observability only. It does not change recommendation
 scoring or claim that the human opening heuristic is universally optimal.

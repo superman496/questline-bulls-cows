@@ -154,24 +154,25 @@ source differ:
 The CLI is a reference adapter and debugging surface. Future WebUI must consume
 `GameSession` and `StoryBook` data directly, not parse CLI output.
 
-## 7. 1.4 direction
+## 7. Product layering (implemented in 1.4)
 
-The next product layer is:
+The product layer added in 1.4 is:
 
 ```text
 QuestLine Core Engine
         ↓
 GameSession / StoryBook
         ↓
-CLI Adapter       WebUI Adapter
+CLI Adapter       WebUI Adapter (not yet built)
 ```
 
-`GameSession` should own mode, answer visibility, history, current state,
-story, status, and turn transitions. `StoryBook` should grow from an event
-sequence into a complete case narrative with chapters, turning points,
-rejected hypotheses, current suspense, and closure.
+`GameSession` owns mode, answer visibility, history, current state, story,
+status, and turn transitions. `StoryBook` grew from an event sequence into a
+complete case narrative with chapters, a digit identity-arc, per-digit case
+dossiers, and closure. The WebUI adapter itself is the next milestone (see
+`PROJECT_NOTES.md` §12); the boundary below is what it should consume.
 
-### 1.4 implementation boundary
+### GameSession implementation boundary
 
 `GameSession` is now the shared orchestration object. It exposes structured
 state and transition data through `current_state()`, `timeline()`, `to_dict()`,
@@ -195,3 +196,52 @@ StoryBook events directly rather than parse terminal text.
 Rejected feedback is recorded in the session replay audit but is not appended
 to `history` or `StoryBook`. This keeps the investigation's world-line factual
 while preserving evidence of an input mistake or an attempted false feedback.
+
+## 8. Six-slot recommendation contract
+
+`QuestLineSolver.choose()` always returns exactly six recommendation slots
+(outside the opening book and the inconsistent-state phase), in a fixed
+order:
+
+```text
+1-3  QuestLine  — up to three distinct investigation routes
+4    AVG        — the pure expected-remaining-candidates optimum
+5    MM         — the pure worst-case (minimax) optimum
+6    Conspiracy — the last route still inside the efficiency frontier
+```
+
+Design rules that keep this panel trustworthy:
+
+- **No merging.** If AVG, MM, or Conspiracy happens to land on the same guess
+  as a QuestLine slot, it is still shown as its own slot rather than being
+  deduplicated away. Collapsing repeats used to make the panel look tidier at
+  the cost of misrepresenting how often the "obvious" guess actually is the
+  mathematical optimum.
+- **One shared schema.** Every slot — QuestLine, AVG, MM, and Conspiracy —
+  carries the same `action`, `is_candidate`, `group_information_gain`, and
+  `evidence_profile` fields, computed by the same `classify_action()` /
+  `group_information_gain()` pass over all 5040 guesses. A slot's `source`
+  changes what it is labeled; it never changes what fields are available.
+- **The QuestLine routes are diversity-aware, not score-identical.** They are
+  selected from the efficiency-qualified pool by walking it in ranked order
+  and preferring guesses with a distinct `evidence_profile` (new groups, new
+  positions, and locally-strong pairs/triples), only falling back to
+  "next-best regardless of profile" once the pool runs out of distinct
+  profiles. Ties are broken by route continuity, then by lexicographic code —
+  never by re-ordering for the sake of looking varied.
+- **The efficiency guardrail must not override the task ranking.** Only
+  `resolve_endgame`'s QuestLine slots skip `efficiency_frontier`: at endgame,
+  `task_sort_key` has already deliberately ranked testing a real candidate
+  above a purely efficient probe, and the AVG/MM-relative guardrail exists to
+  keep the panel from suggesting something clearly bad — not to veto that
+  choice. The Conspiracy slot always goes through the guardrail, in every
+  task, so it stays "the worst option still worth showing" rather than "the
+  worst option, period."
+- **Text is centralized.** The task label, the recommendation reason, and the
+  action-type label each have exactly one source of truth on
+  `_QuestLineReasoningLayer` — `PUBLIC_TASKS` / `PUBLIC_REASONS` /
+  `PUBLIC_ACTION_LABELS` (with an `_EN` counterpart for each), read through
+  `public_task()` / `public_reason()` / `public_action_label()`. An adapter
+  renders these fields; it does not hand-copy the dictionaries or reinterpret
+  `action` to decide what a slot means. Two adapters showing the same task
+  under different wording is a bug, not a style choice.

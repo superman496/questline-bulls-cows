@@ -2,28 +2,40 @@
 
 > Project handoff and development notes for QuestLine.
 >
-> Current stable milestone: **v1.3.0 – Narrative Engine Refactor**
+> Current stable milestone: **v1.4.0 – GameSession, Narrative Productization, and Six-Slot Recommendation Hardening**
 >
-> Next milestone: **v1.4.0 – GameSession and Narrative Productization**
+> Next milestone: **v1.5 – WebUI adapter**
 
 ## 0. Current Development Baseline
 
-The repository is currently at the completed **v1.3.0 Narrative Engine
-Refactor** baseline. The next conversation should continue from this state and
-follow the v1.4 plan in `CHANGELOG.md`.
+The repository now includes the completed 1.4 session layer on top of the 1.3
+engine, plus a hardening pass on the recommendation panel and the StoryBook
+audit view. See `CHANGELOG.md` for the itemized record of what shipped in
+each version — this file only tracks where the project stands and what is
+still open.
 
-The conceptual explanation of the 1.3 engine and story pipeline lives in
-`ARCHITECTURE.md`. Read it before changing the investigation model or adding a
-new presentation adapter.
+The conceptual explanation of the engine and story pipeline lives in
+`ARCHITECTURE.md`. Read it before changing the investigation model, the
+six-slot recommendation contract, or adding a new presentation adapter.
+
+**Before trusting a "tests pass" claim, run them yourself.** Most tests in
+`tests/test_solver.py` construct `QuestLineSolver(use_cache=False)`, which
+rebuilds the full 5040×5040 feedback matrix from scratch — if `pytest` isn't
+on hand, a plain script that imports `test_solver` and calls every `test_*`
+function can take over a minute per test and looks like it hung. It hasn't;
+monkey-patching `_build_feedback_matrix` to memoize once per process (not
+touching the on-disk cache) brings a full 36-test run down to ~70s. This cost
+a fair amount of time to discover this pass — don't rediscover it.
 
 ### v1.4 development order
 
-1. Define the shared `GameSession` contract.
-2. Route Assist, Simulation, and Adventure through it.
-3. Upgrade `StoryBook` from event log to case narrative.
-4. Expose structured read APIs for future WebUI adapters.
-5. Add replay, save/resume, export, and fault scenarios.
-6. Keep CLI as the reference/debug client.
+1. Define the shared `GameSession` contract. ✅
+2. Route Assist, Simulation, and Adventure through it. ✅
+3. Upgrade `StoryBook` from event log to case narrative. ✅
+4. Expose structured read APIs for future WebUI adapters. ✅
+5. Add replay, save/resume, export, and fault scenarios. ✅
+6. Keep CLI as the reference/debug client. ✅
+7. Harden the six-slot recommendation panel and the StoryBook audit view. ✅
 
 The intended architecture is:
 
@@ -58,32 +70,37 @@ QuestLine is not intended to be only a cold solver that prints the next guess. T
 - Which recommendation comes from QuestLine, AVG, MM, or Conspiracy?
 - When does the game become logically solved?
 - If the player keeps probing after logical solve, how is that recorded?
-- In v1.3, which world-line is currently strongest?
+- Which world-line is currently strongest, and why?
 
 ---
 
 ## 2. Current Stable Version
 
-Current stable tag:
+Current stable milestone:
 
 ```text
-v1.2.0
+v1.4.0
 ```
 
-Current stable CLI file:
+Current CLI file:
 
 ```text
-questline_cli_v1_3_standalone.py
+questline_cli.py
 ```
 
-The v1.2.0 tag marks the stable interaction layer before starting v1.3 world-line analysis.
+The CLI file dropped its `_v1_3_standalone` suffix in 1.4: the version lived
+in the filename for a while, which meant the name went stale every time the
+engine moved on. The file is now named for what it is, not the release it was
+written in; version history belongs in `CHANGELOG.md`.
 
 Recommended run commands:
 
 ```bash
-python questline_cli_v1_3_standalone.py --lang zh
-python questline_cli_v1_3_standalone.py --lang en
+python questline_cli.py --lang zh
+python questline_cli.py --lang en
 ```
+
+No git tag has been cut for 1.4.0 yet — see [§8](#8-git--version-state).
 
 ---
 
@@ -92,12 +109,15 @@ python questline_cli_v1_3_standalone.py --lang en
 Core files:
 
 ```text
-questline.py                      # Core solver engine
-questline_cli_v1_3_standalone.py  # Stable v1.3 narrative CLI
-benchmark_full.py                 # Full 5040-answer benchmark
-README.md                         # Public project documentation
-CONTRIBUTING.md                   # Contribution notes
-.gitignore                        # Ignore cache, replay, benchmark output, pycache
+questline.py               # Core solver engine, GameSession, StoryBook
+questline_cli.py           # Narrative CLI: Assist / Simulation / Adventure
+benchmark_full.py          # Full 5040-answer benchmark
+benchmark_worldline.py     # World-line observability benchmark
+README.md                  # Public project documentation
+ARCHITECTURE.md            # Engine design and decision chain
+CHANGELOG.md               # Version history
+CONTRIBUTING.md            # Contribution notes
+.gitignore                 # Ignore cache, replay, benchmark output, __pycache__
 ```
 
 Current local/generated files that should generally not be committed:
@@ -106,6 +126,8 @@ Current local/generated files that should generally not be committed:
 .questline_cache/
 questline_replay_*.json
 benchmark_full_results.json
+benchmark_worldline_results.json
+benchmark_sample_*_results.json
 __pycache__/
 ```
 
@@ -113,32 +135,13 @@ These are ignored by `.gitignore`.
 
 ---
 
-## 4. v1.2.0 Stable CLI Features
+## 4. Feature Summary
 
-v1.2.0 focuses on stabilizing the interactive CLI.
-
-Implemented features:
-
-- Chinese / English UI
-- Multi-game loop
-- Solved games do not force program exit
-- `undo`, `history`, `report`, `new`, `quit`, and `help` commands
-- Recommendation menu
-- Recommendation sources:
-  - `QuestLine`
-  - `AVG`
-  - `MM`
-  - `Conspiracy`
-  - `Manual`
-- Stable 2 / 3 / 6 digit input grammar
-- Flexible non-digit separators
-- Feedback legality checks
-- Duplicate guess conflict checks
-- Consistency check before accepting any input, including `4b0c`
-- Jackpot messages for first-guess solves
-- Logical-solved state when only one possible answer remains
-- Post-logic probing / 头铁验证 mode
-- Replay JSON with rich metadata
+See `README.md` → "Features" for the current, user-facing feature list. This
+file does not keep a second copy — two lists drift the same way two label
+dictionaries used to (see `CHANGELOG.md`'s 1.4.x notes on that). Sections 5-7
+below cover the implementation details README intentionally leaves out
+(exact input grammar, replay JSON field semantics, logical-solve bookkeeping).
 
 ---
 
@@ -279,8 +282,6 @@ Replay JSON records the final effective route, not the full UI operation log.
 
 Therefore, undone moves are **not saved** in replay JSON.
 
-This is intentional for v1.2:
-
 ```text
 Replay JSON = final effective reasoning route
 not full operation event log
@@ -410,156 +411,67 @@ post_logic_probe_count = number of rows with post_logic_probe == true
 
 ## 8. Git / Version State
 
-The current stable interaction layer was tagged:
+The last cut tag was the pre-1.3 stable interaction layer:
 
 ```text
 v1.2.0
 ```
-
-Command used:
 
 ```bash
 git tag -a v1.2.0 -m "QuestLine CLI v1.2 stable"
 git push origin v1.2.0
 ```
 
-This tag marks the stable CLI interaction layer before v1.3 world-line work.
-
-No GitHub Release has been created yet. The tag is sufficient as the current stable version anchor.
+1.3.0 and 1.4.0 are recorded in `CHANGELOG.md` but have not been tagged in
+git yet. Cutting a `v1.4.0` tag (and a GitHub Release) once this repository is
+under version control again is the natural next housekeeping step.
 
 ---
 
 ## 9. Benchmark Status
 
-Full exhaustive benchmark over all 5040 possible answers has been run before v1.2 stabilization.
-
-Known benchmark summary:
+The full exhaustive 5040-answer run is slow enough (each answer plays several
+full-space scoring rounds) that it is not re-run for every change. The last
+numbers quoted in this project (pre-1.3 engine, full 5040 answers) were:
 
 ```text
-total_codes: 5040
-total_steps: 26695
-average_steps: 5.296626984126984
-min_steps: 1
+average_steps: 5.2966
 max_steps: 7
-```
-
-Distribution:
-
-```text
-1 step: 1
-2 steps: 4
-3 steps: 108
-4 steps: 546
-5 steps: 2249
-6 steps: 1991
-7 steps: 141
 8+ steps: 0
 ```
 
-Important result:
+1.3's own verification instead sampled 500 answers post-refactor and got
+`average 4.7580, max 6` (see `CHANGELOG.md`). After the 1.4 recommendation-panel
+fixes in this pass, a fresh 300-answer sample got:
 
 ```text
-All 5040 answers solve within 7 steps.
-No 8+ step cases.
+average_steps: 4.60
+max_steps: 7
+8+ steps: 0
 ```
+
+(`python benchmark_full.py --limit 300`; the raw JSON output is gitignored
+and was deleted after these numbers were recorded here — regenerate it with
+the same command if you need the per-answer detail.) A full 5040-answer
+re-run was attempted during this pass but did not finish; the full-space
+numbers above are still the pre-1.3 ones. Re-run `benchmark_full.py` (no
+`--limit`) for a definitive current number — expect it to take on the order
+of 30+ minutes. See `benchmark_worldline_report.md` (generated by
+`benchmark_worldline.py`) for the current world-line observability output;
+its own raw JSON output is likewise gitignored and disposable.
 
 ---
 
-## 10. v1.3 Direction: World-Line Analysis
+## 10. Historical planning notes
 
-v1.3 is not primarily a post-game review menu. The main goal is **world-line analysis**.
-
-The user wants QuestLine to explain the reasoning story, not only output guesses.
-
-Planned v1.3 analysis modules:
-
-- Main world / 主世界
-- Group structure based on:
-  - `01`
-  - `23`
-  - `45`
-  - `67`
-  - `89`
-- Top 2-digit group support
-- Top 3-digit group support
-- Top 4-digit candidate / group support
-- Current main-world support rate
-- Main-world support changes over time
-- Endgame candidate ordering by narrative support
-- Lucky-hit / 暴击参考 candidates
-- Recommendation explanation for:
-  - QuestLine
-  - AVG
-  - MM
-  - Conspiracy
-
-The report should help answer:
-
-```text
-为什么这条世界线更可信？
-哪些组合正在变强？
-主世界支持度是否突然下降？
-当前引擎推荐是否符合人类推理预期？
-```
+Sections that used to live here — the pre-1.3 world-line analysis plan and
+the "strategy expectations to revisit" notes — described work that has since
+shipped. `CHANGELOG.md`'s 1.3.0 and 1.4.0 entries are the authoritative record
+of what was actually built; this file no longer duplicates that plan.
 
 ---
 
-## 11. Strategy Expectations to Revisit in v1.3
-
-The user has a specific human strategy expectation:
-
-```text
-First move: judge 01 / 23
-Second move: introduce 45
-Third move: cross-test two digits from the first three groups and introduce 67
-```
-
-The user noticed that the current engine sometimes proposes moves like `68`-heavy tests and wants v1.3 world-line data before deciding how to adjust the engine.
-
-Important design principle:
-
-```text
-Do not immediately retune the engine before world-line visibility exists.
-First expose world-line statistics, then use evidence to decide whether the engine should change.
-```
-
----
-
-## 12. Potential v1.3 Output Sections
-
-A future `report` could include:
-
-```text
-Current State
-- Round
-- Remaining possible answers
-- Direct hit chance
-- Pace / opening read
-- Strategy state
-
-World-Line Analysis
-- Main world
-- Main world support
-- Top 2-groups
-- Top 3-groups
-- Top 4-groups
-
-Recommendation Panel
-- QuestLine Top 3
-- Conspiracy Pick
-- AVG
-- MM
-- bucket summaries
-
-Endgame / Lucky Hit
-- candidate list when small enough
-- candidates sorted by narrative support
-- direct-hit references
-```
-
----
-
-## 13. Project Philosophy Notes
+## 11. Project Philosophy Notes
 
 QuestLine should remain playable and explainable.
 
@@ -585,17 +497,16 @@ Alternate timeline.
 
 ---
 
-## 14. Recommended Next Steps
+## 12. Recommended Next Steps
 
-Before starting v1.3:
+After 1.4:
 
-1. Keep `questline_cli_v1_3_standalone.py` as the stable CLI.
-2. Add this file as `PROJECT_NOTES.md`.
-3. Optionally rename the stable CLI later to:
-
-```text
-questline_cli.py
-```
-
-4. Start v1.3 by adding world-line analysis helpers, preferably without immediately changing the engine recommendation logic.
-5. Use world-line visibility to evaluate whether the engine should be retuned.
+1. Cut a `v1.4.0` git tag once the repository is back under version control.
+2. Re-run `benchmark_full.py` and `benchmark_worldline.py` and refresh the
+   numbers quoted in `README.md` / `PROJECT_NOTES.md` §9.
+3. Start the WebUI adapter described in `ARCHITECTURE.md` §7, consuming
+   `GameSession.current_state()` / `StoryBook` directly rather than parsing
+   CLI text.
+4. Decide whether `action_is_eligible`'s "one new group at a time" rule
+   should extend to any other task, or stay specific to
+   `cross_test_new_group` / `converge_outer_choice`.

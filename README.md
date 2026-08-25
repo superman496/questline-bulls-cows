@@ -1,12 +1,16 @@
 # QuestLine
 
-**Version 1.3**
+**Version 1.4**
 
-Version 1.3 is the **Narrative Engine Refactor**. It changes the engine from a
-round-oriented scorer into a fact-driven investigation system. The old scoring
-patch layer is no longer the source of strategy decisions; task policy,
-candidate facts, group relations, position evidence, and world-line changes
-now form the decision chain.
+QuestLine is a fact-driven investigation engine for the classic 4-digit Bulls
+& Cows game. The 1.3 line replaced the original round-oriented scorer with an
+investigation-task pipeline: candidate facts, digit identity, group
+relations, position evidence, and world-line changes now drive every guess,
+not a tuned score. The 1.4 line adds a shared `GameSession` state layer, turns
+`StoryBook` into a full case narrative, and hardens the six-slot
+recommendation panel (QuestLine ×3, AVG, MM, Conspiracy) so every slot carries
+the same evidence and the endgame never silently drops a real candidate in
+favor of a purely "efficient" probe.
 
 **A narrative-driven Bulls & Cows solver.**  
 **Follow the strongest story. Distrust coincidence.**
@@ -66,16 +70,22 @@ Endgame: compress exactly.
 
 ## Features
 
-- Single-file Python solver.
-- No third-party runtime dependencies.
+- Single-file Python solver (`questline.py`), no third-party runtime dependencies.
 - Deterministic lexicographic tie-breaks.
-- Fast feedback matrix for interactive use.
+- Fast feedback matrix for interactive use, cached on disk between runs.
+- Six-slot recommendation panel — QuestLine ×3, AVG, MM, Conspiracy — where
+  every slot shares the same action/candidate schema, and the endgame task
+  ranking (prefer a real candidate) is never overridden by the efficiency
+  guardrail.
 - Human-readable reports.
 - World-line analysis in reports: main fixed-digit groups, support rates, and support changes over time.
-- StoryBook chapters that connect state, action, feedback, facts, and world-line changes.
+- StoryBook chapters that connect state, action, feedback, facts, and world-line changes, plus an audit view with a digit identity-arc and per-digit case dossiers.
 - Three narrative CLI modes: Assist, Simulation, and Adventure.
 - `GameSession` shared state for all three modes.
 - Structured session snapshots and transition timelines for future WebUI clients.
+- Centralized, bilingual (zh/en) task, reason, and action labels
+  (`QuestLineSolver.public_task` / `public_reason` / `public_action_label`),
+  so the CLI cannot drift into inconsistent wording across screens.
 - Compatible helper functions:
   - `choose_human_like_guess(history, top_k=15)`
   - `print_report(history)`
@@ -144,12 +154,12 @@ print_report(history)
 Reports also expose the current world-line picture: the strongest fixed-digit
 groups (`01`, `23`, `45`, `67`, `89`), their candidate support, the leading
 margin over the next world, and the most supported 2-, 3-, and 4-digit
-patterns. This is observability only in v1.3; it does not retune recommendation
-scoring yet.
+patterns. This is observability only; it does not retune recommendation
+scoring.
 
-See [`CHANGELOG.md`](CHANGELOG.md) for the complete 1.3 engine migration record.
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the engine design and the path from
-structured transitions to the QuestLine story line.
+See [`CHANGELOG.md`](CHANGELOG.md) for the complete version history.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the engine design, the
+investigation decision chain, and the six-slot recommendation contract.
 
 Interactive mode:
 
@@ -161,7 +171,7 @@ interactive()
 
 ### CLI modes
 
-The standalone CLI uses one narrative vocabulary for all three ways to play:
+The CLI uses one narrative vocabulary for all three ways to play:
 
 1. **Assist mode / 协查模式** — the user plays an external game and enters
    feedback; QuestLine interprets the evidence and recommends the next action.
@@ -171,9 +181,9 @@ The standalone CLI uses one narrative vocabulary for all three ways to play:
    guesses while the system returns feedback and develops the story.
 
 ```bash
-python questline_cli_v1_3_standalone.py --mode assist
-python questline_cli_v1_3_standalone.py --mode simulation --answer 0456
-python questline_cli_v1_3_standalone.py --mode adventure
+python questline_cli.py --mode assist
+python questline_cli.py --mode simulation --answer 0456
+python questline_cli.py --mode adventure
 ```
 
 During Simulation and Adventure, enter `story` or `book` to read the current
@@ -203,9 +213,7 @@ Possible output:
 
 ---
 
-## Full benchmark
-
-QuestLine was evaluated against the full search space of all valid answers.
+## Benchmark
 
 Rules:
 
@@ -214,56 +222,55 @@ Rules:
 - leading zero allowed
 - total answer space: `10P4 = 5040`
 
+The exhaustive 5040-answer run is expensive to repeat on every change (each
+answer plays through several full-space scoring rounds), so day-to-day
+verification uses a random sample, the same way the 1.3 release did. A fresh
+300-answer sample after the 1.4 recommendation-panel fixes:
+
 | Metric | Value |
 |---|---:|
-| Total answers | 5040 |
-| Total steps | 26695 |
-| Average steps | 5.2966 |
+| Answers sampled | 300 |
+| Total steps | 1380 |
+| Average steps | 4.60 |
 | Min steps | 1 |
 | Max steps | 7 |
-| ≤2 steps | 5 |
-| ≤3 steps | 113 |
-| ≤4 steps | 659 |
-| ≤5 steps | 2908 |
-| ≤6 steps | 4899 |
-| 7+ steps | 141 |
+| ≤4 steps | 136 (45.3%) |
+| ≤5 steps | 255 (85.0%) |
+| ≤6 steps | 295 (98.3%) |
+| 7+ steps | 5 (1.7%) |
 | 8+ steps | 0 |
 
-Step distribution:
+Run it yourself:
 
-| Steps | Count |
-|---:|---:|
-| 1 | 1 |
-| 2 | 4 |
-| 3 | 108 |
-| 4 | 546 |
-| 5 | 2249 |
-| 6 | 1991 |
-| 7 | 141 |
+```bash
+python benchmark_full.py --limit 300
+```
 
-Summary:
-
-> QuestLine solves every valid answer in at most 7 steps, with an average of 5.2966 steps.  
-> 97.20% of all answers are solved within 6 steps.  
-> No 8+ step cases were found in the full benchmark.
+Or the full exhaustive benchmark (`python benchmark_full.py`, no `--limit`) —
+see `PROJECT_NOTES.md` for the last known full-space numbers and when they
+were last refreshed.
 
 ---
 
 ## Repository layout
 
-Suggested layout:
-
 ```text
 questline-bulls-cows/
-├── questline.py
-├── README.md
+├── questline.py               # Core solver engine: facts, tasks, six-slot recommendations, GameSession, StoryBook
+├── questline_cli.py           # Interactive CLI: Assist / Simulation / Adventure, Chinese / English UI
+├── benchmark_full.py          # Exhaustive 5040-answer benchmark
+├── benchmark_worldline.py     # World-line observability benchmark
+├── README.md                  # This file
+├── ARCHITECTURE.md            # Engine design and decision chain
+├── CHANGELOG.md               # Version history
+├── PROJECT_NOTES.md           # Development handoff notes
+├── CONTRIBUTING.md
 ├── LICENSE
 ├── .gitignore
 ├── examples/
 │   └── interactive_demo.py
-├── tests/
-│   └── test_solver.py
-└── benchmark.py
+└── tests/
+    └── test_solver.py
 ```
 
 ---
